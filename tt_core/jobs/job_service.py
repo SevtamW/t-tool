@@ -12,7 +12,20 @@ from sqlalchemy import text
 from tt_core.db.schema import initialize_database
 from tt_core.glossary.enforcer import enforce_must_use, reinject_term_tokens
 from tt_core.glossary.glossary_store import load_must_use_terms
-from tt_core.jobs.mock_translator import mock_translate
+from tt_core.llm.policy import (
+    DEFAULT_MODEL_BY_PROVIDER,
+    ModelPolicy,
+    TASK_REVIEWER,
+    TASK_TRANSLATOR,
+    TaskPolicy,
+    get_secret,
+    load_policy,
+)
+from tt_core.llm.prompts import DEFAULT_STYLE_HINTS, build_reviewer_prompt, build_translation_prompt
+from tt_core.llm.provider_base import LLMProvider
+from tt_core.llm.provider_local_stub import LocalProviderStub
+from tt_core.llm.provider_mock import MockProvider
+from tt_core.llm.provider_openai import OpenAIProvider
 from tt_core.project.config import read_config
 from tt_core.project.paths import project_config_path
 from tt_core.qa.checks import (
@@ -27,6 +40,7 @@ from tt_core.tm.tm_search import find_exact, search_fuzzy
 from tt_core.tm.tm_store import record_tm_use
 
 TM_FUZZY_THRESHOLD = 92.0
+REVIEW_RISK_THRESHOLD = 5
 
 
 @dataclass(slots=True)
@@ -37,6 +51,34 @@ class JobRunSummary:
     target_locale: str
     processed_segments: int
     status: str
+
+
+@dataclass(slots=True)
+class _ResolvedProvider:
+    task: str
+    provider_name: str
+    model: str
+    provider: LLMProvider
+    fallback_from: str | None = None
+
+
+class _LegacyTranslatorProvider(LLMProvider):
+    def __init__(self, *, translator: Callable[[str, str], str], target_locale: str) -> None:
+        self._translator = translator
+        self._target_locale = target_locale
+
+    def generate(
+        self,
+        *,
+        task: str,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        del task
+        del temperature
+        del max_tokens
+        return self._translator(prompt, self._target_locale)
 
 
 def _utc_now_iso() -> str:
@@ -99,6 +141,19 @@ def _is_global_glossary_enabled(*, db_path: Path) -> bool:
         return False
 
 
+def _load_style_hints(*, db_path: Path) -> str:
+    config_path = project_config_path(Path(db_path).parent)
+    if not config_path.exists():
+        return DEFAULT_STYLE_HINTS
+
+    try:
+        style_hints = read_config(config_path).translation_style_hints
+        normalized = str(style_hints or "").strip()
+        return normalized if normalized else DEFAULT_STYLE_HINTS
+    except Exception:
+        return DEFAULT_STYLE_HINTS
+
+
 def _replace_qa_flags(
     *,
     connection,
@@ -151,6 +206,155 @@ def _replace_qa_flags(
         ),
         payloads,
     )
+
+
+def _collect_qa_issues(
+    *,
+    source_text: str,
+    final_text: str,
+    expected_enforcements,
+    translated_with_tokens: str | None,
+) -> list[QAIssue]:
+    issues = check_placeholders_unchanged(source_text, final_text)
+    issues.extend(check_newlines_preserved(source_text, final_text))
+    issues.extend(
+        check_glossary_compliance(
+            expected_enforcements,
+            final_text,
+            translated_with_tokens=translated_with_tokens,
+        )
+    )
+    return issues
+
+
+def _compute_risk_score(
+    *,
+    source_text: str,
+    char_limit: int | None,
+    placeholders: list[Placeholder],
+    glossary_hits: int,
+) -> int:
+    score = 0
+
+    if char_limit is not None:
+        score += 3
+    if placeholders:
+        score += 2
+    if any(item.type == "angle_tag" for item in placeholders):
+        score += 2
+    if glossary_hits > 1:
+        score += 1
+    if len(source_text.strip()) < 12:
+        score += 2
+
+    return score
+
+
+def _default_provider_factory(provider_name: str, model: str) -> LLMProvider:
+    if provider_name == "mock":
+        return MockProvider(model=model)
+    if provider_name == "local":
+        return LocalProviderStub(model=model)
+    if provider_name == "openai":
+        return OpenAIProvider(model=model)
+    raise ValueError(f"Unsupported LLM provider '{provider_name}'")
+
+
+def _resolve_provider(
+    *,
+    task: str,
+    task_policy: TaskPolicy,
+    provider_factory: Callable[[str, str], LLMProvider],
+    strict_provider_selection: bool,
+) -> _ResolvedProvider:
+    provider_name = task_policy.provider
+    model = task_policy.model
+    fallback_from: str | None = None
+
+    if provider_name == "openai" and not get_secret("openai_api_key"):
+        if strict_provider_selection:
+            raise RuntimeError(
+                "OpenAI provider was selected, but openai_api_key is not configured in keyring."
+            )
+        provider_name = "mock"
+        model = DEFAULT_MODEL_BY_PROVIDER[provider_name]
+        fallback_from = "openai"
+
+    provider = provider_factory(provider_name, model)
+    return _ResolvedProvider(
+        task=task,
+        provider_name=provider_name,
+        model=model,
+        provider=provider,
+        fallback_from=fallback_from,
+    )
+
+
+def _translator_prompt(
+    *,
+    provider_name: str,
+    source_text: str,
+    protected_text: str,
+    target_locale: str,
+    style_hints: str,
+) -> str:
+    if provider_name in {"mock", "legacy_callable"}:
+        # Keep mock outputs backward-compatible with ticket 1-6 tests.
+        return protected_text
+    return build_translation_prompt(
+        source_text=source_text,
+        protected_text=protected_text,
+        target_locale=target_locale,
+        style_hints=style_hints,
+    )
+
+
+def _reviewer_prompt(
+    *,
+    provider_name: str,
+    source_text: str,
+    draft_text: str,
+    target_locale: str,
+    style_hints: str,
+) -> str:
+    if provider_name == "mock":
+        return draft_text
+    return build_reviewer_prompt(
+        source_text=source_text,
+        draft_text=draft_text,
+        target_locale=target_locale,
+        style_hints=style_hints,
+    )
+
+
+def _model_info(
+    *,
+    translator_provider: _ResolvedProvider,
+    reviewer_provider: _ResolvedProvider | None,
+    risk_score: int,
+) -> dict[str, str]:
+    if reviewer_provider is None:
+        payload: dict[str, str] = {
+            "provider": translator_provider.provider_name,
+            "model": translator_provider.model,
+            "risk_score": str(risk_score),
+        }
+        if translator_provider.fallback_from:
+            payload["fallback_from"] = translator_provider.fallback_from
+        return payload
+
+    payload = {
+        "provider": reviewer_provider.provider_name,
+        "model": reviewer_provider.model,
+        "translator_provider": translator_provider.provider_name,
+        "translator_model": translator_provider.model,
+        "risk_score": str(risk_score),
+    }
+    if translator_provider.fallback_from:
+        payload["translator_fallback_from"] = translator_provider.fallback_from
+    if reviewer_provider.fallback_from:
+        payload["fallback_from"] = reviewer_provider.fallback_from
+    return payload
 
 
 def create_job(
@@ -247,6 +451,8 @@ def run_mock_translation_job(
     target_locale: str,
     decision_trace: dict[str, object] | None = None,
     translator: Callable[[str, str], str] | None = None,
+    provider_factory: Callable[[str, str], LLMProvider] | None = None,
+    strict_provider_selection: bool = False,
 ) -> JobRunSummary:
     mapping_signature = _latest_mapping_signature(db_path=db_path, project_id=project_id)
     merged_trace = dict(decision_trace or {})
@@ -270,8 +476,33 @@ def run_mock_translation_job(
     )
 
     processed = 0
-    translator_fn = translator or mock_translate
     include_global_glossary = _is_global_glossary_enabled(db_path=Path(db_path))
+    style_hints = _load_style_hints(db_path=Path(db_path))
+    policy: ModelPolicy = load_policy(Path(db_path).parent)
+    provider_factory_fn = provider_factory or _default_provider_factory
+
+    if translator is None:
+        resolved_translator_provider = _resolve_provider(
+            task=TASK_TRANSLATOR,
+            task_policy=policy.translator,
+            provider_factory=provider_factory_fn,
+            strict_provider_selection=strict_provider_selection,
+        )
+    else:
+        resolved_translator_provider = _ResolvedProvider(
+            task=TASK_TRANSLATOR,
+            provider_name="legacy_callable",
+            model="callable",
+            provider=_LegacyTranslatorProvider(translator=translator, target_locale=target_locale),
+        )
+
+    resolved_reviewer_provider = _resolve_provider(
+        task=TASK_REVIEWER,
+        task_policy=policy.reviewer,
+        provider_factory=provider_factory_fn,
+        strict_provider_selection=strict_provider_selection,
+    )
+
     engine = initialize_database(Path(db_path))
     try:
         with engine.begin() as connection:
@@ -284,7 +515,7 @@ def run_mock_translation_job(
             segment_rows = connection.execute(
                 text(
                     """
-                    SELECT id, source_locale, source_text
+                    SELECT id, source_locale, source_text, char_limit
                     FROM segments
                     WHERE asset_id = :asset_id
                     ORDER BY row_index, id
@@ -297,6 +528,7 @@ def run_mock_translation_job(
                 segment_id = str(row[0])
                 source_locale = str(row[1])
                 source_text = str(row[2])
+                char_limit = int(row[3]) if row[3] is not None else None
                 protected_source = protect_text(source_text)
 
                 connection.execute(
@@ -363,19 +595,17 @@ def run_mock_translation_job(
                         record_tm_use(connection=connection, tm_id=best_hit.tm_id)
 
                 if tm_candidate_text is not None and tm_candidate_type is not None and tm_model_info is not None:
-                    issues = check_placeholders_unchanged(source_text, tm_candidate_text)
-                    issues.extend(check_newlines_preserved(source_text, tm_candidate_text))
-                    issues.extend(
-                        check_glossary_compliance(
-                            enforced.expected_enforcements,
-                            tm_candidate_text,
-                        )
+                    tm_issues = _collect_qa_issues(
+                        source_text=source_text,
+                        final_text=tm_candidate_text,
+                        expected_enforcements=enforced.expected_enforcements,
+                        translated_with_tokens=None,
                     )
                     _replace_qa_flags(
                         connection=connection,
                         segment_id=segment_id,
                         target_locale=target_locale,
-                        issues=issues,
+                        issues=tm_issues,
                     )
                     upsert_candidate(
                         connection=connection,
@@ -389,29 +619,91 @@ def run_mock_translation_job(
                     processed += 1
                     continue
 
-                translated_with_term_tokens = translator_fn(
-                    enforced.text_with_term_tokens,
-                    target_locale,
+                translator_prompt = _translator_prompt(
+                    provider_name=resolved_translator_provider.provider_name,
+                    source_text=source_text,
+                    protected_text=enforced.text_with_term_tokens,
+                    target_locale=target_locale,
+                    style_hints=style_hints,
+                )
+                translated_with_term_tokens = resolved_translator_provider.provider.generate(
+                    task=target_locale
+                    if resolved_translator_provider.provider_name == "mock"
+                    else TASK_TRANSLATOR,
+                    prompt=translator_prompt,
+                    temperature=0.1,
+                    max_tokens=512,
                 )
                 translated_with_terms = reinject_term_tokens(
                     translated_with_term_tokens,
                     enforced.term_map,
                 )
-                final_text = reinject(protected_source, translated_with_terms)
-                issues = check_placeholders_unchanged(source_text, final_text)
-                issues.extend(check_newlines_preserved(source_text, final_text))
-                issues.extend(
-                    check_glossary_compliance(
-                        enforced.expected_enforcements,
-                        final_text,
-                        translated_with_tokens=translated_with_term_tokens,
-                    )
+                draft_text = reinject(protected_source, translated_with_terms)
+
+                # Always run QA after translator.
+                draft_issues = _collect_qa_issues(
+                    source_text=source_text,
+                    final_text=draft_text,
+                    expected_enforcements=enforced.expected_enforcements,
+                    translated_with_tokens=translated_with_term_tokens,
                 )
+
+                risk_score = _compute_risk_score(
+                    source_text=source_text,
+                    char_limit=char_limit,
+                    placeholders=protected_source.placeholders,
+                    glossary_hits=len(enforced.expected_enforcements),
+                )
+
+                final_text = draft_text
+                final_issues = draft_issues
+                final_candidate_type = "llm_draft"
+                final_model_info = _model_info(
+                    translator_provider=resolved_translator_provider,
+                    reviewer_provider=None,
+                    risk_score=risk_score,
+                )
+
+                if risk_score >= REVIEW_RISK_THRESHOLD:
+                    reviewer_prompt = _reviewer_prompt(
+                        provider_name=resolved_reviewer_provider.provider_name,
+                        source_text=source_text,
+                        draft_text=translated_with_term_tokens,
+                        target_locale=target_locale,
+                        style_hints=style_hints,
+                    )
+                    reviewed_with_term_tokens = resolved_reviewer_provider.provider.generate(
+                        task=TASK_REVIEWER,
+                        prompt=reviewer_prompt,
+                        temperature=0.0,
+                        max_tokens=512,
+                    )
+                    reviewed_with_terms = reinject_term_tokens(
+                        reviewed_with_term_tokens,
+                        enforced.term_map,
+                    )
+                    reviewed_text = reinject(protected_source, reviewed_with_terms)
+
+                    # Always run QA after reviewer as well.
+                    final_issues = _collect_qa_issues(
+                        source_text=source_text,
+                        final_text=reviewed_text,
+                        expected_enforcements=enforced.expected_enforcements,
+                        translated_with_tokens=reviewed_with_term_tokens,
+                    )
+                    final_text = reviewed_text
+                    final_candidate_type = "llm_reviewed"
+                    final_model_info = _model_info(
+                        translator_provider=resolved_translator_provider,
+                        reviewer_provider=resolved_reviewer_provider,
+                        risk_score=risk_score,
+                    )
+
                 _replace_qa_flags(
                     connection=connection,
                     segment_id=segment_id,
                     target_locale=target_locale,
-                    issues=issues,
+                    issues=final_issues,
                 )
 
                 upsert_candidate(
@@ -419,9 +711,9 @@ def run_mock_translation_job(
                     segment_id=segment_id,
                     target_locale=target_locale,
                     candidate_text=final_text,
-                    candidate_type="mock",
+                    candidate_type=final_candidate_type,
                     score=1.0,
-                    model_info={"provider": "mock", "version": "1"},
+                    model_info=final_model_info,
                 )
                 processed += 1
     except Exception as exc:

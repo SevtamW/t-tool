@@ -27,7 +27,7 @@ def _asset_label(asset_id: str, original_name: str | None, received_at: str) -> 
     return f"{original_name or '(unnamed)'} | {received_at} | {asset_id[:8]}"
 
 
-st.title("Run Job (Mock Translation)")
+st.title("Run Job")
 
 selected_slug = st.session_state.get("selected_project_slug")
 projects_root = Path(st.session_state.get("projects_root", "./projects")).expanduser()
@@ -70,7 +70,7 @@ selected_target_locale = st.selectbox(
 segment_count = len(list_segments(db_path=db_path, asset_id=selected_asset_id))
 st.write(f"Segments in selected asset: {segment_count}")
 
-if st.button("Run mock translation", type="primary"):
+if st.button("Run translation", type="primary"):
     try:
         result = run_mock_translation_job(
             db_path=db_path,
@@ -86,8 +86,7 @@ if st.button("Run mock translation", type="primary"):
     st.session_state["selected_asset_id"] = selected_asset_id
     st.session_state["selected_target_locale"] = selected_target_locale
 
-    st.success("Mock translation job completed")
+    st.success("Translation job completed")
     st.write(f"Job ID: {result.job_id}")
     st.write(f"Target locale: {result.target_locale}")
     st.write(f"Segments processed: {result.processed_segments}")
-

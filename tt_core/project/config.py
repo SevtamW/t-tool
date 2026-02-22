@@ -15,13 +15,8 @@ class ProjectConfig(BaseModel):
     default_target_locale: str
     enabled_locales: list[str] = Field(default_factory=list)
     global_game_glossary_enabled: bool = True
-    model_policy: dict[str, str] = Field(
-        default_factory=lambda: {
-            "translation": "provider_placeholder",
-            "qa": "provider_placeholder",
-            "schema_mapping": "provider_placeholder",
-        }
-    )
+    translation_style_hints: str = "informal, use Du for German"
+    model_policy: dict[str, object] = Field(default_factory=dict)
 
 
 def write_config(config_path: Path, config: ProjectConfig) -> None:

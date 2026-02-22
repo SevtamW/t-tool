@@ -67,6 +67,11 @@ def _apply_filter(rows: list[ReviewRow], filter_option: str) -> list[ReviewRow]:
     return rows
 
 
+def _has_candidate_text(row: ReviewRow) -> bool:
+    value = row.candidate_text
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _init_row_state(rows: list[ReviewRow], target_locale: str) -> None:
     for row in rows:
         edit_key = _edit_key(target_locale, row.segment_id)
@@ -167,18 +172,41 @@ if not rows:
     st.info("No segments in this asset.")
     st.stop()
 
+filter_options = ["show all", "show only not approved", "show only approved", "Only rows with QA flags"]
+if "review_filter_option" not in st.session_state:
+    st.session_state["review_filter_option"] = "show all"
+
 filter_option = st.selectbox(
     "Filter",
-    options=["show all", "show only not approved", "show only approved", "Only rows with QA flags"],
+    options=filter_options,
+    key="review_filter_option",
 )
 filtered_rows = _apply_filter(rows, filter_option)
 _init_row_state(filtered_rows, selected_target_locale)
 
 approved_count = sum(1 for row in rows if row.is_approved)
 qa_flag_count = sum(1 for row in rows if _row_has_qa_flags(row))
+candidate_count = sum(1 for row in rows if _has_candidate_text(row))
 st.write(
-    f"Rows: {len(rows)} | Approved: {approved_count} | Pending: {len(rows) - approved_count} | QA flagged: {qa_flag_count}"
+    "Rows: "
+    f"{len(rows)} | "
+    f"With candidate: {candidate_count} | "
+    f"Approved: {approved_count} | "
+    f"Pending: {len(rows) - approved_count} | "
+    f"QA flagged: {qa_flag_count}"
 )
+
+if candidate_count == 0:
+    st.warning(
+        "No generated translations were found for this asset/target locale yet. "
+        "Run a job for the same asset and target locale, then refresh."
+    )
+
+if not filtered_rows and rows:
+    st.warning("No rows match the current filter.")
+    if st.button("Reset filter to show all"):
+        st.session_state["review_filter_option"] = "show all"
+        st.rerun()
 
 table_rows = [
     {
