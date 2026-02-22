@@ -46,6 +46,8 @@ def _apply_filter(rows: list[ReviewRow], filter_option: str) -> list[ReviewRow]:
         return [row for row in rows if row.is_approved]
     if filter_option == "show only not approved":
         return [row for row in rows if not row.is_approved]
+    if filter_option == "Only rows with QA flags":
+        return [row for row in rows if row.has_qa_flags]
     return rows
 
 
@@ -153,13 +155,16 @@ if not rows:
 
 filter_option = st.selectbox(
     "Filter",
-    options=["show all", "show only not approved", "show only approved"],
+    options=["show all", "show only not approved", "show only approved", "Only rows with QA flags"],
 )
 filtered_rows = _apply_filter(rows, filter_option)
 _init_row_state(filtered_rows, selected_target_locale)
 
 approved_count = sum(1 for row in rows if row.is_approved)
-st.write(f"Rows: {len(rows)} | Approved: {approved_count} | Pending: {len(rows) - approved_count}")
+qa_flag_count = sum(1 for row in rows if row.has_qa_flags)
+st.write(
+    f"Rows: {len(rows)} | Approved: {approved_count} | Pending: {len(rows) - approved_count} | QA flagged: {qa_flag_count}"
+)
 
 table_rows = [
     {
@@ -168,6 +173,7 @@ table_rows = [
         "source_text": row.source_text,
         "candidate_text": row.candidate_text,
         "approved_text": row.approved_text,
+        "qa_flags": " | ".join(row.qa_messages),
     }
     for row in filtered_rows
 ]
@@ -199,6 +205,9 @@ for row in filtered_rows:
         st.write(f"Source: {row.source_text}")
         st.write(f"Latest candidate: {row.candidate_text or '(none)'}")
         st.write(f"Approved text: {row.approved_text or '(none)'}")
+        if row.qa_messages:
+            for message in row.qa_messages:
+                st.warning(f"QA: {message}")
 
         st.text_area(
             "Edit target text",
@@ -219,4 +228,3 @@ for row in filtered_rows:
             ):
                 st.success(f"Row {row.row_index} approved.")
                 st.rerun()
-

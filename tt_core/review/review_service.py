@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -53,6 +54,8 @@ class ReviewRow:
     candidate_text: str | None
     approved_text: str | None
     is_approved: bool
+    qa_messages: list[str] = field(default_factory=list)
+    has_qa_flags: bool = False
 
 
 @dataclass(slots=True)
@@ -394,8 +397,27 @@ def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> lis
                 ),
                 {"asset_id": asset_id, "target_locale": target_locale},
             ).all()
+            qa_rows = connection.execute(
+                text(
+                    """
+                    SELECT q.segment_id, q.message
+                    FROM qa_flags AS q
+                    INNER JOIN segments AS s
+                        ON s.id = q.segment_id
+                    WHERE s.asset_id = :asset_id
+                      AND q.target_locale = :target_locale
+                      AND q.resolved_at IS NULL
+                    ORDER BY q.created_at, q.id
+                    """
+                ),
+                {"asset_id": asset_id, "target_locale": target_locale},
+            ).all()
     finally:
         engine.dispose()
+
+    qa_by_segment: dict[str, list[str]] = defaultdict(list)
+    for qa_row in qa_rows:
+        qa_by_segment[str(qa_row[0])].append(str(qa_row[1]))
 
     return [
         ReviewRow(
@@ -408,6 +430,8 @@ def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> lis
             candidate_text=row[6],
             approved_text=row[7],
             is_approved=row[7] is not None,
+            qa_messages=qa_by_segment.get(str(row[0]), []),
+            has_qa_flags=bool(qa_by_segment.get(str(row[0]), [])),
         )
         for row in rows
     ]

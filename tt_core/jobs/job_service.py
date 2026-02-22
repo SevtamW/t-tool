@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,8 @@ from sqlalchemy import text
 
 from tt_core.db.schema import initialize_database
 from tt_core.jobs.mock_translator import mock_translate
+from tt_core.qa.checks import QAIssue, check_newlines_preserved, check_placeholders_unchanged
+from tt_core.qa.placeholder_firewall import Placeholder, protect_text, reinject
 from tt_core.review.review_service import upsert_candidate
 
 
@@ -54,6 +57,76 @@ def _latest_mapping_signature(*, db_path: Path, project_id: str) -> str | None:
     if row is None:
         return None
     return str(row[0])
+
+
+def _placeholder_payload(placeholders: list[Placeholder]) -> str:
+    return json.dumps(
+        [
+            {
+                "type": item.type,
+                "value": item.value,
+                "start": item.start,
+                "end": item.end,
+                "token": item.token,
+            }
+            for item in placeholders
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _replace_qa_flags(
+    *,
+    connection,
+    segment_id: str,
+    target_locale: str,
+    issues: list[QAIssue],
+) -> None:
+    connection.execute(
+        text(
+            """
+            DELETE FROM qa_flags
+            WHERE segment_id = :segment_id
+              AND target_locale = :target_locale
+            """
+        ),
+        {
+            "segment_id": segment_id,
+            "target_locale": target_locale,
+        },
+    )
+
+    if not issues:
+        return
+
+    created_at = _utc_now_iso()
+    payloads = [
+        {
+            "id": str(uuid4()),
+            "segment_id": segment_id,
+            "target_locale": target_locale,
+            "type": issue.issue_type,
+            "severity": issue.severity,
+            "message": issue.message,
+            "span_json": json.dumps(issue.span),
+            "created_at": created_at,
+        }
+        for issue in issues
+    ]
+    connection.execute(
+        text(
+            """
+            INSERT INTO qa_flags(
+                id, segment_id, target_locale, type, severity,
+                message, span_json, created_at
+            ) VALUES (
+                :id, :segment_id, :target_locale, :type, :severity,
+                :message, :span_json, :created_at
+            )
+            """
+        ),
+        payloads,
+    )
 
 
 def create_job(
@@ -149,6 +222,7 @@ def run_mock_translation_job(
     asset_id: str,
     target_locale: str,
     decision_trace: dict[str, object] | None = None,
+    translator: Callable[[str, str], str] | None = None,
 ) -> JobRunSummary:
     mapping_signature = _latest_mapping_signature(db_path=db_path, project_id=project_id)
     merged_trace = dict(decision_trace or {})
@@ -172,6 +246,7 @@ def run_mock_translation_job(
     )
 
     processed = 0
+    translator_fn = translator or mock_translate
     engine = initialize_database(Path(db_path))
     try:
         with engine.begin() as connection:
@@ -189,15 +264,48 @@ def run_mock_translation_job(
 
             for row in segment_rows:
                 segment_id = str(row[0])
-                source_text = str(row[1]).strip()
-                if not source_text:
+                source_text = str(row[1])
+                protected_source = protect_text(source_text)
+
+                connection.execute(
+                    text(
+                        """
+                        UPDATE segments
+                        SET placeholders_json = :placeholders_json
+                        WHERE id = :segment_id
+                        """
+                    ),
+                    {
+                        "segment_id": segment_id,
+                        "placeholders_json": _placeholder_payload(protected_source.placeholders),
+                    },
+                )
+
+                if not source_text.strip():
+                    _replace_qa_flags(
+                        connection=connection,
+                        segment_id=segment_id,
+                        target_locale=target_locale,
+                        issues=[],
+                    )
                     continue
+
+                translated_protected = translator_fn(protected_source.protected, target_locale)
+                final_text = reinject(protected_source, translated_protected)
+                issues = check_placeholders_unchanged(source_text, final_text)
+                issues.extend(check_newlines_preserved(source_text, final_text))
+                _replace_qa_flags(
+                    connection=connection,
+                    segment_id=segment_id,
+                    target_locale=target_locale,
+                    issues=issues,
+                )
 
                 upsert_candidate(
                     connection=connection,
                     segment_id=segment_id,
                     target_locale=target_locale,
-                    candidate_text=mock_translate(source_text, target_locale),
+                    candidate_text=final_text,
                     candidate_type="mock",
                     score=1.0,
                     model_info={"provider": "mock", "version": "1"},
@@ -231,4 +339,3 @@ def run_mock_translation_job(
         processed_segments=processed,
         status="done",
     )
-
