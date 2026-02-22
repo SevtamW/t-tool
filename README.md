@@ -49,9 +49,11 @@ projects/<slug>/
 
 ## Run project locally
 
+```bash
   source .venv/bin/activate
   pip install -e ".[dev]"
   streamlit run tt_app/streamlit_app.py
+```
 
 ## Notes
 

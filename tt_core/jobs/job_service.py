@@ -10,8 +10,17 @@ from uuid import uuid4
 from sqlalchemy import text
 
 from tt_core.db.schema import initialize_database
+from tt_core.glossary.enforcer import enforce_must_use, reinject_term_tokens
+from tt_core.glossary.glossary_store import load_must_use_terms
 from tt_core.jobs.mock_translator import mock_translate
-from tt_core.qa.checks import QAIssue, check_newlines_preserved, check_placeholders_unchanged
+from tt_core.project.config import read_config
+from tt_core.project.paths import project_config_path
+from tt_core.qa.checks import (
+    QAIssue,
+    check_glossary_compliance,
+    check_newlines_preserved,
+    check_placeholders_unchanged,
+)
 from tt_core.qa.placeholder_firewall import Placeholder, protect_text, reinject
 from tt_core.review.review_service import upsert_candidate
 
@@ -73,6 +82,17 @@ def _placeholder_payload(placeholders: list[Placeholder]) -> str:
         ],
         ensure_ascii=False,
     )
+
+
+def _is_global_glossary_enabled(*, db_path: Path) -> bool:
+    config_path = project_config_path(Path(db_path).parent)
+    if not config_path.exists():
+        return False
+
+    try:
+        return bool(read_config(config_path).global_game_glossary_enabled)
+    except Exception:
+        return False
 
 
 def _replace_qa_flags(
@@ -247,9 +267,16 @@ def run_mock_translation_job(
 
     processed = 0
     translator_fn = translator or mock_translate
+    include_global_glossary = _is_global_glossary_enabled(db_path=Path(db_path))
     engine = initialize_database(Path(db_path))
     try:
         with engine.begin() as connection:
+            glossary_terms = load_must_use_terms(
+                connection=connection,
+                project_id=project_id,
+                locale_code=target_locale,
+                include_global=include_global_glossary,
+            )
             segment_rows = connection.execute(
                 text(
                     """
@@ -290,10 +317,28 @@ def run_mock_translation_job(
                     )
                     continue
 
-                translated_protected = translator_fn(protected_source.protected, target_locale)
-                final_text = reinject(protected_source, translated_protected)
+                enforced = enforce_must_use(
+                    text=protected_source.protected,
+                    terms=glossary_terms,
+                )
+                translated_with_term_tokens = translator_fn(
+                    enforced.text_with_term_tokens,
+                    target_locale,
+                )
+                translated_with_terms = reinject_term_tokens(
+                    translated_with_term_tokens,
+                    enforced.term_map,
+                )
+                final_text = reinject(protected_source, translated_with_terms)
                 issues = check_placeholders_unchanged(source_text, final_text)
                 issues.extend(check_newlines_preserved(source_text, final_text))
+                issues.extend(
+                    check_glossary_compliance(
+                        enforced.expected_enforcements,
+                        final_text,
+                        translated_with_tokens=translated_with_term_tokens,
+                    )
+                )
                 _replace_qa_flags(
                     connection=connection,
                     segment_id=segment_id,
