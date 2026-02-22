@@ -41,13 +41,29 @@ def _bulk_key(target_locale: str, segment_id: str) -> str:
     return f"review_bulk_{target_locale}_{segment_id}"
 
 
+def _row_qa_messages(row: ReviewRow) -> list[str]:
+    raw_messages = getattr(row, "qa_messages", [])
+    if isinstance(raw_messages, list):
+        return [str(item) for item in raw_messages]
+    if raw_messages is None:
+        return []
+    return [str(raw_messages)]
+
+
+def _row_has_qa_flags(row: ReviewRow) -> bool:
+    explicit_flag = getattr(row, "has_qa_flags", None)
+    if explicit_flag is not None:
+        return bool(explicit_flag)
+    return bool(_row_qa_messages(row))
+
+
 def _apply_filter(rows: list[ReviewRow], filter_option: str) -> list[ReviewRow]:
     if filter_option == "show only approved":
         return [row for row in rows if row.is_approved]
     if filter_option == "show only not approved":
         return [row for row in rows if not row.is_approved]
     if filter_option == "Only rows with QA flags":
-        return [row for row in rows if row.has_qa_flags]
+        return [row for row in rows if _row_has_qa_flags(row)]
     return rows
 
 
@@ -64,7 +80,6 @@ def _init_row_state(rows: list[ReviewRow], target_locale: str) -> None:
 
 def _approve_row(*, db_path: Path, row: ReviewRow, target_locale: str) -> bool:
     edit_key = _edit_key(target_locale, row.segment_id)
-    bulk_key = _bulk_key(target_locale, row.segment_id)
 
     draft_text = str(st.session_state.get(edit_key, ""))
     if not draft_text.strip():
@@ -94,7 +109,6 @@ def _approve_row(*, db_path: Path, row: ReviewRow, target_locale: str) -> bool:
         final_text=draft_text,
         approved_by="me",
     )
-    st.session_state[bulk_key] = True
     return True
 
 
@@ -161,7 +175,7 @@ filtered_rows = _apply_filter(rows, filter_option)
 _init_row_state(filtered_rows, selected_target_locale)
 
 approved_count = sum(1 for row in rows if row.is_approved)
-qa_flag_count = sum(1 for row in rows if row.has_qa_flags)
+qa_flag_count = sum(1 for row in rows if _row_has_qa_flags(row))
 st.write(
     f"Rows: {len(rows)} | Approved: {approved_count} | Pending: {len(rows) - approved_count} | QA flagged: {qa_flag_count}"
 )
@@ -173,7 +187,7 @@ table_rows = [
         "source_text": row.source_text,
         "candidate_text": row.candidate_text,
         "approved_text": row.approved_text,
-        "qa_flags": " | ".join(row.qa_messages),
+        "qa_flags": " | ".join(_row_qa_messages(row)),
     }
     for row in filtered_rows
 ]
@@ -205,8 +219,9 @@ for row in filtered_rows:
         st.write(f"Source: {row.source_text}")
         st.write(f"Latest candidate: {row.candidate_text or '(none)'}")
         st.write(f"Approved text: {row.approved_text or '(none)'}")
-        if row.qa_messages:
-            for message in row.qa_messages:
+        row_qa_messages = _row_qa_messages(row)
+        if row_qa_messages:
+            for message in row_qa_messages:
                 st.warning(f"QA: {message}")
 
         st.text_area(
