@@ -170,3 +170,12 @@ if st.button("Import", type="primary"):
     st.write(f"Rows skipped (empty source): {summary.skipped_rows}")
     st.write("Mapped columns:")
     st.json(summary.mapped_columns)
+
+    st.session_state["selected_asset_id"] = summary.asset_id
+
+    if source_mode == "Upload file" and file_type == "xlsx":
+        uploaded_map = st.session_state.get("uploaded_xlsx_bytes_by_asset", {})
+        if not isinstance(uploaded_map, dict):
+            uploaded_map = {}
+        uploaded_map[summary.asset_id] = file_bytes
+        st.session_state["uploaded_xlsx_bytes_by_asset"] = uploaded_map

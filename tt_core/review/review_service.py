@@ -17,6 +17,8 @@ class AssetListItem:
     id: str
     original_name: str | None
     received_at: str
+    asset_type: str
+    storage_path: str | None
 
 
 @dataclass(slots=True)
@@ -80,7 +82,7 @@ def list_assets(*, db_path: Path, project_id: str) -> list[AssetListItem]:
             rows = connection.execute(
                 text(
                     """
-                    SELECT id, original_name, received_at
+                    SELECT id, original_name, received_at, asset_type, storage_path
                     FROM assets
                     WHERE project_id = :project_id
                     ORDER BY received_at DESC
@@ -96,6 +98,8 @@ def list_assets(*, db_path: Path, project_id: str) -> list[AssetListItem]:
             id=str(row[0]),
             original_name=row[1],
             received_at=str(row[2]),
+            asset_type=str(row[3]),
+            storage_path=row[4],
         )
         for row in rows
     ]
@@ -449,4 +453,3 @@ def list_approved_for_asset(*, db_path: Path, asset_id: str, target_locale: str)
         )
         for row in rows
     ]
-

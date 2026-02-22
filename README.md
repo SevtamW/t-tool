@@ -47,6 +47,12 @@ projects/<slug>/
   README.txt
 ```
 
+## Run project locally
+
+  source .venv/bin/activate
+  pip install -e ".[dev]"
+  streamlit run tt_app/streamlit_app.py
+
 ## Notes
 
 - Local-first only: each project has one SQLite DB file in its own folder.
