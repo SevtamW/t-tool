@@ -23,6 +23,10 @@ from tt_core.qa.checks import (
 )
 from tt_core.qa.placeholder_firewall import Placeholder, protect_text, reinject
 from tt_core.review.review_service import upsert_candidate
+from tt_core.tm.tm_search import find_exact, search_fuzzy
+from tt_core.tm.tm_store import record_tm_use
+
+TM_FUZZY_THRESHOLD = 92.0
 
 
 @dataclass(slots=True)
@@ -280,7 +284,7 @@ def run_mock_translation_job(
             segment_rows = connection.execute(
                 text(
                     """
-                    SELECT id, source_text
+                    SELECT id, source_locale, source_text
                     FROM segments
                     WHERE asset_id = :asset_id
                     ORDER BY row_index, id
@@ -291,7 +295,8 @@ def run_mock_translation_job(
 
             for row in segment_rows:
                 segment_id = str(row[0])
-                source_text = str(row[1])
+                source_locale = str(row[1])
+                source_text = str(row[2])
                 protected_source = protect_text(source_text)
 
                 connection.execute(
@@ -321,6 +326,69 @@ def run_mock_translation_job(
                     text=protected_source.protected,
                     terms=glossary_terms,
                 )
+
+                tm_candidate_text: str | None = None
+                tm_candidate_type: str | None = None
+                tm_candidate_score = 0.0
+                tm_model_info: dict[str, str] | None = None
+
+                exact_match = find_exact(
+                    connection=connection,
+                    project_id=project_id,
+                    source_locale=source_locale,
+                    target_locale=target_locale,
+                    source_text=source_text,
+                )
+                if exact_match is not None:
+                    tm_candidate_text = exact_match.target_text
+                    tm_candidate_type = "tm_exact"
+                    tm_candidate_score = 1.0
+                    tm_model_info = {"provider": "tm", "version": "1", "match": "exact"}
+                    record_tm_use(connection=connection, tm_id=exact_match.id)
+                else:
+                    fuzzy_hits = search_fuzzy(
+                        connection=connection,
+                        project_id=project_id,
+                        source_locale=source_locale,
+                        target_locale=target_locale,
+                        source_text=source_text,
+                        limit=5,
+                    )
+                    if fuzzy_hits and fuzzy_hits[0].score >= TM_FUZZY_THRESHOLD:
+                        best_hit = fuzzy_hits[0]
+                        tm_candidate_text = best_hit.target_text
+                        tm_candidate_type = "tm_fuzzy"
+                        tm_candidate_score = best_hit.score / 100.0
+                        tm_model_info = {"provider": "tm", "version": "1", "match": "fuzzy"}
+                        record_tm_use(connection=connection, tm_id=best_hit.tm_id)
+
+                if tm_candidate_text is not None and tm_candidate_type is not None and tm_model_info is not None:
+                    issues = check_placeholders_unchanged(source_text, tm_candidate_text)
+                    issues.extend(check_newlines_preserved(source_text, tm_candidate_text))
+                    issues.extend(
+                        check_glossary_compliance(
+                            enforced.expected_enforcements,
+                            tm_candidate_text,
+                        )
+                    )
+                    _replace_qa_flags(
+                        connection=connection,
+                        segment_id=segment_id,
+                        target_locale=target_locale,
+                        issues=issues,
+                    )
+                    upsert_candidate(
+                        connection=connection,
+                        segment_id=segment_id,
+                        target_locale=target_locale,
+                        candidate_text=tm_candidate_text,
+                        candidate_type=tm_candidate_type,
+                        score=tm_candidate_score,
+                        model_info=tm_model_info,
+                    )
+                    processed += 1
+                    continue
+
                 translated_with_term_tokens = translator_fn(
                     enforced.text_with_term_tokens,
                     target_locale,

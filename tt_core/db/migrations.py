@@ -265,8 +265,35 @@ def _migration_v1(connection: Connection) -> None:
         connection.exec_driver_sql(statement)
 
 
+def _migration_v2(connection: Connection) -> None:
+    connection.exec_driver_sql(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS tm_fts USING fts5(
+            project_id UNINDEXED,
+            source_locale UNINDEXED,
+            target_locale UNINDEXED,
+            source_text,
+            target_text,
+            tm_id UNINDEXED
+        )
+        """
+    )
+    connection.exec_driver_sql("DELETE FROM tm_fts")
+    connection.exec_driver_sql(
+        """
+        INSERT INTO tm_fts(
+            project_id, source_locale, target_locale, source_text, target_text, tm_id
+        )
+        SELECT
+            project_id, source_locale, target_locale, source_text, target_text, id
+        FROM tm_entries
+        """
+    )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _migration_v1,
+    2: _migration_v2,
 }
 
 

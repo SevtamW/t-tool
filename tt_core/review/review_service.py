@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from tt_core.db.schema import initialize_database
+from tt_core.tm.tm_store import upsert_tm_entry
 
 
 @dataclass(slots=True)
@@ -338,6 +339,44 @@ def upsert_approved_translation(
                     "approved_by": approved_by,
                     "approved_at": now,
                 },
+            )
+
+            segment_row = connection.execute(
+                text(
+                    """
+                    SELECT
+                        a.project_id,
+                        s.source_locale,
+                        s.source_text,
+                        s.asset_id,
+                        s.sheet_name,
+                        s.row_index
+                    FROM segments AS s
+                    INNER JOIN assets AS a
+                        ON a.id = s.asset_id
+                    WHERE s.id = :segment_id
+                    LIMIT 1
+                    """
+                ),
+                {"segment_id": segment_id},
+            ).first()
+            if segment_row is None:
+                raise RuntimeError(f"Segment not found for approval: {segment_id}")
+
+            sheet_name = segment_row[4]
+            row_index = segment_row[5]
+            origin_row_ref = f"{sheet_name}:{row_index}"
+            upsert_tm_entry(
+                connection=connection,
+                project_id=str(segment_row[0]),
+                source_locale=str(segment_row[1]),
+                target_locale=target_locale,
+                source_text=str(segment_row[2]),
+                target_text=final_text,
+                origin="approved",
+                origin_asset_id=str(segment_row[3]) if segment_row[3] is not None else None,
+                origin_row_ref=origin_row_ref,
+                quality_tag="trusted",
             )
 
             id_row = connection.execute(

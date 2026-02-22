@@ -84,7 +84,7 @@ def test_project_db_and_config_are_initialized(tmp_path: Path) -> None:
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
         assert schema_version is not None
-        assert schema_version[0] == "1"
+        assert schema_version[0] == "2"
 
         project_row = conn.execute(
             """
@@ -125,4 +125,4 @@ def test_project_db_and_config_are_initialized(tmp_path: Path) -> None:
         ["project-info", "localization-base", "--root", str(projects_root)],
     )
     assert info_result.exit_code == 0, info_result.output
-    assert "Schema version: 1" in info_result.output
+    assert "Schema version: 2" in info_result.output

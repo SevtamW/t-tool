@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 DEFAULT_PROJECTS_DIRNAME = "projects"
 PROJECT_DB_FILENAME = "project.db"
 PROJECT_CONFIG_FILENAME = "config.yml"
