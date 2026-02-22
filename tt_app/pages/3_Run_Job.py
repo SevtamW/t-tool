@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import streamlit as st
+
+
+def _ensure_repo_root_on_path() -> None:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        if (parent / "tt_core").is_dir():
+            root = str(parent)
+            if root not in sys.path:
+                sys.path.insert(0, root)
+            return
+
+
+_ensure_repo_root_on_path()
+
+from tt_core.jobs.job_service import run_mock_translation_job
+from tt_core.project.create_project import load_project_info
+from tt_core.review.review_service import list_assets, list_segments
+
+
+def _asset_label(asset_id: str, original_name: str | None, received_at: str) -> str:
+    return f"{original_name or '(unnamed)'} | {received_at} | {asset_id[:8]}"
+
+
+st.title("Run Job (Mock Translation)")
+
+selected_slug = st.session_state.get("selected_project_slug")
+projects_root = Path(st.session_state.get("projects_root", "./projects")).expanduser()
+
+if not selected_slug:
+    st.warning("No project selected. Open the 'Select Project' page first.")
+    st.stop()
+
+try:
+    project = load_project_info(selected_slug, root=projects_root)
+except Exception as exc:  # noqa: BLE001
+    st.error(f"Unable to load selected project: {exc}")
+    st.stop()
+
+db_path = project.project_path / "project.db"
+assets = list_assets(db_path=db_path, project_id=project.project_id)
+
+if not assets:
+    st.info("No assets found for this project. Import an XLSX/CSV on page 2 first.")
+    st.stop()
+
+asset_labels = {
+    _asset_label(item.id, item.original_name, item.received_at): item.id for item in assets
+}
+selected_asset_label = st.selectbox("Asset", options=list(asset_labels.keys()))
+selected_asset_id = asset_labels[selected_asset_label]
+
+target_locales = [locale for locale in project.enabled_locales if locale != project.source_locale]
+if not target_locales:
+    st.error("No enabled target locales found. Add at least one non-source locale.")
+    st.stop()
+
+default_target = project.target_locale if project.target_locale in target_locales else target_locales[0]
+selected_target_locale = st.selectbox(
+    "Target locale",
+    options=target_locales,
+    index=target_locales.index(default_target),
+)
+
+segment_count = len(list_segments(db_path=db_path, asset_id=selected_asset_id))
+st.write(f"Segments in selected asset: {segment_count}")
+
+if st.button("Run mock translation", type="primary"):
+    try:
+        result = run_mock_translation_job(
+            db_path=db_path,
+            project_id=project.project_id,
+            asset_id=selected_asset_id,
+            target_locale=selected_target_locale,
+            decision_trace={"page": "3_Run_Job"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Failed to run job: {exc}")
+        st.stop()
+
+    st.session_state["selected_asset_id"] = selected_asset_id
+    st.session_state["selected_target_locale"] = selected_target_locale
+
+    st.success("Mock translation job completed")
+    st.write(f"Job ID: {result.job_id}")
+    st.write(f"Target locale: {result.target_locale}")
+    st.write(f"Segments processed: {result.processed_segments}")
+
