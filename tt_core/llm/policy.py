@@ -11,6 +11,9 @@ from tt_core.project.config import read_config, write_config
 from tt_core.project.paths import project_config_path
 
 KEYRING_SERVICE_NAME = "t-tool"
+SECRET_LABELS = {
+    "openai_api_key": "OpenAI API Key",
+}
 
 TASK_TRANSLATOR = "translator"
 TASK_REVIEWER = "reviewer"
@@ -178,6 +181,14 @@ def _linux_delete_secret(name: str) -> None:
 
 
 @dataclass(slots=True, frozen=True)
+class StoredSecretStatus:
+    name: str
+    label: str
+    is_configured: bool
+    preview: str | None
+
+
+@dataclass(slots=True, frozen=True)
 class TaskPolicy:
     provider: str
     model: str
@@ -213,6 +224,35 @@ class ModelPolicy:
                 "model": self.schema_resolver.model,
             },
         }
+
+
+def mask_secret_value(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        return ""
+    if len(normalized) <= 4:
+        return "*" * len(normalized)
+    if len(normalized) <= 8:
+        visible = 2
+        hidden = len(normalized) - (visible * 2)
+        return f"{normalized[:visible]}{'*' * hidden}{normalized[-visible:]}"
+    hidden = len(normalized) - 8
+    return f"{normalized[:4]}{'*' * hidden}{normalized[-4:]}"
+
+
+def list_secret_statuses() -> list[StoredSecretStatus]:
+    statuses: list[StoredSecretStatus] = []
+    for name, label in SECRET_LABELS.items():
+        value = get_secret(name)
+        statuses.append(
+            StoredSecretStatus(
+                name=name,
+                label=label,
+                is_configured=bool(value),
+                preview=mask_secret_value(value) if value else None,
+            )
+        )
+    return statuses
 
 
 def set_secret(name: str, value: str) -> None:

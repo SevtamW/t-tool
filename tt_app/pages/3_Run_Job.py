@@ -27,6 +27,9 @@ def _asset_label(asset_id: str, original_name: str | None, received_at: str) -> 
     return f"{original_name or '(unnamed)'} | {received_at} | {asset_id[:8]}"
 
 
+LAST_JOB_SUMMARY_KEY = "run_job_last_summary"
+
+
 st.title("Run Job")
 
 selected_slug = st.session_state.get("selected_project_slug")
@@ -72,21 +75,39 @@ st.write(f"Segments in selected asset: {segment_count}")
 
 if st.button("Run translation", type="primary"):
     try:
-        result = run_mock_translation_job(
-            db_path=db_path,
-            project_id=project.project_id,
-            asset_id=selected_asset_id,
-            target_locale=selected_target_locale,
-            decision_trace={"page": "3_Run_Job"},
-        )
+        with st.spinner("Running translation job..."):
+            result = run_mock_translation_job(
+                db_path=db_path,
+                project_id=project.project_id,
+                asset_id=selected_asset_id,
+                target_locale=selected_target_locale,
+                decision_trace={"page": "3_Run_Job"},
+            )
     except Exception as exc:  # noqa: BLE001
         st.error(f"Failed to run job: {exc}")
         st.stop()
 
     st.session_state["selected_asset_id"] = selected_asset_id
     st.session_state["selected_target_locale"] = selected_target_locale
+    st.session_state[LAST_JOB_SUMMARY_KEY] = {
+        "project_slug": project.slug,
+        "asset_id": selected_asset_id,
+        "target_locale": result.target_locale,
+        "job_id": result.job_id,
+        "processed_segments": result.processed_segments,
+        "status": result.status,
+    }
 
+last_job_summary = st.session_state.get(LAST_JOB_SUMMARY_KEY)
+if (
+    isinstance(last_job_summary, dict)
+    and last_job_summary.get("project_slug") == project.slug
+    and last_job_summary.get("asset_id") == selected_asset_id
+    and last_job_summary.get("target_locale") == selected_target_locale
+):
     st.success("Translation job completed")
-    st.write(f"Job ID: {result.job_id}")
-    st.write(f"Target locale: {result.target_locale}")
-    st.write(f"Segments processed: {result.processed_segments}")
+    st.caption("Last completed job")
+    st.write(f"Job ID: {last_job_summary['job_id']}")
+    st.write(f"Target locale: {last_job_summary['target_locale']}")
+    st.write(f"Segments processed: {last_job_summary['processed_segments']}")
+    st.write(f"Status: {last_job_summary['status']}")

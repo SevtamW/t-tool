@@ -58,6 +58,25 @@ def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> _FakeKeyring:
     return fake
 
 
+def test_mask_secret_value_only_exposes_edges() -> None:
+    assert policy_module.mask_secret_value("abcd") == "****"
+    assert policy_module.mask_secret_value("abcdef") == "ab**ef"
+    assert policy_module.mask_secret_value("abcdefghij") == "abcd**ghij"
+
+
+def test_list_secret_statuses_reports_known_stored_keys(
+    fake_keyring: _FakeKeyring,
+) -> None:
+    policy_module.set_secret("openai_api_key", "sk-test-1234")
+
+    statuses = {status.name: status for status in policy_module.list_secret_statuses()}
+
+    assert "openai_api_key" in statuses
+    assert statuses["openai_api_key"].label == "OpenAI API Key"
+    assert statuses["openai_api_key"].is_configured is True
+    assert statuses["openai_api_key"].preview == "sk-t****1234"
+
+
 def test_fail_keyring_backend_is_not_treated_as_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
