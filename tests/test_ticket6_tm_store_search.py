@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from tt_core.db.engine import create_sqlite_engine
-from tt_core.db.migrations import _migration_v1, _set_schema_version
+from tt_core.db.migrations import _migration_v1, _migration_v2, _set_schema_version
 from tt_core.db.schema import initialize_database
 from tt_core.importers.import_service import ColumnMapping, import_asset
 from tt_core.jobs.job_service import run_mock_translation_job
@@ -67,7 +67,8 @@ def test_migration_v2_creates_tm_fts_and_updates_schema_version(tmp_path: Path) 
     try:
         with engine.begin() as connection:
             _migration_v1(connection)
-            _set_schema_version(connection, 1)
+            _migration_v2(connection)
+            _set_schema_version(connection, 2)
     finally:
         engine.dispose()
 
@@ -80,7 +81,7 @@ def test_migration_v2_creates_tm_fts_and_updates_schema_version(tmp_path: Path) 
             "SELECT value FROM schema_meta WHERE key='schema_version'"
         ).fetchone()
         assert schema_version is not None
-        assert schema_version[0] == "2"
+        assert schema_version[0] == "3"
 
         tm_fts_row = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='tm_fts'"

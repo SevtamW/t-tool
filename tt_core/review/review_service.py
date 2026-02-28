@@ -53,6 +53,7 @@ class ReviewRow:
     cn_text: str | None
     sheet_name: str | None
     candidate_text: str | None
+    candidate_type: str | None
     approved_text: str | None
     is_approved: bool
     qa_messages: list[str] = field(default_factory=list)
@@ -416,6 +417,7 @@ def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> lis
                         s.cn_text,
                         s.sheet_name,
                         tc.candidate_text,
+                        tc.candidate_type,
                         at.final_text
                     FROM segments AS s
                     LEFT JOIN translation_candidates AS tc
@@ -467,8 +469,9 @@ def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> lis
             cn_text=row[4],
             sheet_name=row[5],
             candidate_text=row[6],
-            approved_text=row[7],
-            is_approved=row[7] is not None,
+            candidate_type=row[7],
+            approved_text=row[8],
+            is_approved=row[8] is not None,
             qa_messages=qa_by_segment.get(str(row[0]), []),
             has_qa_flags=bool(qa_by_segment.get(str(row[0]), [])),
         )

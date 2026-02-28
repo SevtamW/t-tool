@@ -90,6 +90,7 @@ class Segment(SQLModel, table=True):
     key: str | None = None
     source_locale: str
     source_text: str
+    source_text_old: str | None = None
     cn_text: str | None = None
     context_json: str = Field(default="{}")
     char_limit: int | None = None

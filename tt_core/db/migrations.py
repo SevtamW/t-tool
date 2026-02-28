@@ -19,6 +19,11 @@ def _table_exists(connection: Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _column_exists(connection: Connection, table_name: str, column_name: str) -> bool:
+    rows = connection.exec_driver_sql(f"PRAGMA table_info({table_name})").all()
+    return any(str(row[1]) == column_name for row in rows)
+
+
 def get_schema_version(connection: Connection) -> int:
     if not _table_exists(connection, "schema_meta"):
         return 0
@@ -291,9 +296,17 @@ def _migration_v2(connection: Connection) -> None:
     )
 
 
+def _migration_v3(connection: Connection) -> None:
+    if not _column_exists(connection, "segments", "source_text_old"):
+        connection.exec_driver_sql(
+            "ALTER TABLE segments ADD COLUMN source_text_old TEXT"
+        )
+
+
 MIGRATIONS: dict[int, Migration] = {
     1: _migration_v1,
     2: _migration_v2,
+    3: _migration_v3,
 }
 
 

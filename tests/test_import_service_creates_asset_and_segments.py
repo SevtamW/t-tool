@@ -119,7 +119,10 @@ def test_import_service_creates_asset_and_segments(tmp_path: Path) -> None:
         mapping_json = json.loads(schema_row[1])
         assert mapping_json["file_type"] == "xlsx"
         assert mapping_json["sheet_name"] == "Sheet1"
-        assert mapping_json["columns"]["source"] == "EN"
+        assert mapping_json["mode"] == "lp"
+        assert mapping_json["columns"]["source_new"] == "EN"
+        assert mapping_json["columns"]["source_old"] is None
+        assert mapping_json["columns"]["target_locale"] is None
         assert mapping_json["columns"]["cn"] == "CN"
         assert mapping_json["columns"]["context"] == ["Filename"]
     finally:

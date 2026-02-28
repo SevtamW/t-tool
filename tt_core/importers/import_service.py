@@ -9,20 +9,76 @@ from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
+from sqlalchemy.engine import Connection
 
 from tt_core.db.schema import initialize_database
 from tt_core.importers.signature import compute_schema_signature
 
 
-@dataclass(slots=True)
+@dataclass(slots=True, init=False)
 class ColumnMapping:
-    source: str
+    source_new: str
+    source_old: str | None = None
     target: str | None = None
+    target_locale: str | None = None
     cn: str | None = None
     key: str | None = None
     char_limit: str | None = None
     context: list[str] = field(default_factory=list)
+    mode: str = "lp"
+
+    def __init__(
+        self,
+        *,
+        source_new: str | None = None,
+        source: str | None = None,
+        source_old: str | None = None,
+        target: str | None = None,
+        target_locale: str | None = None,
+        cn: str | None = None,
+        key: str | None = None,
+        char_limit: str | None = None,
+        context: list[str] | None = None,
+        mode: str = "lp",
+    ) -> None:
+        resolved_source = source_new if source_new is not None else source
+        self.source_new = resolved_source or ""
+        self.source_old = source_old
+        self.target = target
+        self.target_locale = target_locale
+        self.cn = cn
+        self.key = key
+        self.char_limit = char_limit
+        self.context = list(context or [])
+        self.mode = mode
+
+    @property
+    def source(self) -> str:
+        return self.source_new
+
+    @classmethod
+    def from_mapping_payload(cls, payload: dict[str, object]) -> ColumnMapping:
+        columns = payload.get("columns")
+        column_values = columns if isinstance(columns, dict) else {}
+        context_value = column_values.get("context")
+        if isinstance(context_value, list):
+            context = [str(item) for item in context_value]
+        else:
+            context = []
+
+        return cls(
+            source_new=_string_or_none(column_values.get("source_new"))
+            or _string_or_none(column_values.get("source")),
+            source_old=_string_or_none(column_values.get("source_old")),
+            target=_string_or_none(column_values.get("target")),
+            target_locale=_string_or_none(column_values.get("target_locale")),
+            cn=_string_or_none(column_values.get("cn")),
+            key=_string_or_none(column_values.get("key")),
+            char_limit=_string_or_none(column_values.get("char_limit")),
+            context=context,
+            mode=_string_or_none(payload.get("mode")) or "lp",
+        )
 
 
 @dataclass(slots=True)
@@ -76,13 +132,16 @@ def import_asset(
         "file_type": normalized_file_type,
         "sheet_name": normalized_sheet_name,
         "columns": {
-            "source": mapping.source,
+            "source_new": mapping.source_new,
+            "source_old": mapping.source_old,
             "target": mapping.target,
+            "target_locale": mapping.target_locale,
             "cn": mapping.cn,
             "key": mapping.key,
             "char_limit": mapping.char_limit,
             "context": mapping.context,
         },
+        "mode": mapping.mode,
     }
 
     signature = compute_schema_signature(
@@ -94,25 +153,33 @@ def import_asset(
     now = _utc_now_iso()
     asset_id = str(uuid4())
     schema_profile_candidate_id = str(uuid4())
+    baseline_model_info_json = _to_json({"provider": "import", "kind": "baseline"})
 
     segment_rows: list[dict[str, object | None]] = []
+    baseline_candidate_rows: list[dict[str, object]] = []
     skipped_rows = 0
 
     for position, (_, row) in enumerate(dataframe.iterrows()):
-        source_text = _to_required_text(row.get(mapping.source))
+        source_text = _to_required_text(row.get(mapping.source_new))
         if source_text is None:
             skipped_rows += 1
             continue
 
+        segment_id = str(uuid4())
+        source_text_old = (
+            _to_optional_text(row.get(mapping.source_old)) if mapping.source_old else None
+        )
+
         segment_rows.append(
             {
-                "id": str(uuid4()),
+                "id": segment_id,
                 "asset_id": asset_id,
                 "sheet_name": normalized_sheet_name or None,
                 "row_index": _compute_row_index(row.name, position),
                 "key": _to_optional_text(row.get(mapping.key)) if mapping.key else None,
                 "source_locale": source_locale,
                 "source_text": source_text,
+                "source_text_old": source_text_old,
                 "cn_text": _to_optional_text(row.get(mapping.cn)) if mapping.cn else None,
                 "context_json": _to_json(_build_context_payload(row, mapping.context)),
                 "char_limit": _to_int_or_none(row.get(mapping.char_limit))
@@ -121,6 +188,22 @@ def import_asset(
                 "placeholders_json": "[]",
             }
         )
+
+        if mapping.target and mapping.target_locale:
+            target_text = _to_optional_text(row.get(mapping.target))
+            if target_text is not None:
+                baseline_candidate_rows.append(
+                    {
+                        "id": str(uuid4()),
+                        "segment_id": segment_id,
+                        "target_locale": mapping.target_locale,
+                        "candidate_text": target_text,
+                        "candidate_type": "existing_target",
+                        "score": 1.0,
+                        "model_info_json": baseline_model_info_json,
+                        "generated_at": now,
+                    }
+                )
 
     engine = initialize_database(Path(db_path))
 
@@ -157,15 +240,39 @@ def import_asset(
                     """
                     INSERT INTO segments(
                         id, asset_id, sheet_name, row_index, key, source_locale,
-                        source_text, cn_text, context_json, char_limit, placeholders_json
+                        source_text, source_text_old, cn_text, context_json,
+                        char_limit, placeholders_json
                     ) VALUES (
                         :id, :asset_id, :sheet_name, :row_index, :key, :source_locale,
-                        :source_text, :cn_text, :context_json, :char_limit, :placeholders_json
+                        :source_text, :source_text_old, :cn_text, :context_json,
+                        :char_limit, :placeholders_json
                     )
                     """
                 ),
                 segment_rows,
             )
+
+        if baseline_candidate_rows:
+            insertable_baselines = _filter_unapproved_baseline_candidates(
+                connection=connection,
+                baseline_candidate_rows=baseline_candidate_rows,
+                target_locale=mapping.target_locale,
+            )
+            if insertable_baselines:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO translation_candidates(
+                            id, segment_id, target_locale, candidate_text,
+                            candidate_type, score, model_info_json, generated_at
+                        ) VALUES (
+                            :id, :segment_id, :target_locale, :candidate_text,
+                            :candidate_type, :score, :model_info_json, :generated_at
+                        )
+                        """
+                    ),
+                    insertable_baselines,
+                )
 
         connection.execute(
             text(
@@ -222,8 +329,11 @@ def import_asset(
         imported_rows=len(segment_rows),
         skipped_rows=skipped_rows,
         mapped_columns={
-            "source": mapping.source,
+            "mode": mapping.mode,
+            "source_new": mapping.source_new,
+            "source_old": mapping.source_old,
             "target": mapping.target,
+            "target_locale": mapping.target_locale,
             "cn": mapping.cn,
             "key": mapping.key,
             "char_limit": mapping.char_limit,
@@ -243,14 +353,16 @@ def _utc_now_iso() -> str:
 
 def _normalize_mapping(mapping: ColumnMapping) -> ColumnMapping:
     context = _unique_preserve(mapping.context)
-    source = _clean_column_name(mapping.source) or ""
     return ColumnMapping(
-        source=source,
+        source_new=_clean_column_name(mapping.source_new) or "",
+        source_old=_clean_column_name(mapping.source_old),
         target=_clean_column_name(mapping.target),
+        target_locale=_clean_column_name(mapping.target_locale),
         cn=_clean_column_name(mapping.cn),
         key=_clean_column_name(mapping.key),
         char_limit=_clean_column_name(mapping.char_limit),
         context=context,
+        mode=_normalize_mode(mapping.mode),
     )
 
 
@@ -265,12 +377,20 @@ def _clean_column_name(value: str | None) -> str | None:
 def _validate_mapping_columns(mapping: ColumnMapping, available_columns: list[str]) -> None:
     available = set(available_columns)
 
-    required_column = mapping.source
-    if not required_column:
-        raise ValueError("A source column is required")
+    if not mapping.source_new:
+        raise ValueError("A source_new column is required")
 
-    if required_column not in available:
-        raise ValueError(f"Mapped source column does not exist: {required_column}")
+    if mapping.source_new not in available:
+        raise ValueError(f"Mapped source_new column does not exist: {mapping.source_new}")
+
+    if mapping.mode == "change_source_update" and not mapping.source_old:
+        raise ValueError("A source_old column is required in change_source_update mode")
+
+    if mapping.source_old and mapping.source_old not in available:
+        raise ValueError(f"Mapped source_old column does not exist: {mapping.source_old}")
+
+    if mapping.target_locale and not mapping.target:
+        raise ValueError("A target column is required when target_locale is set")
 
     optional_columns = [mapping.target, mapping.cn, mapping.key, mapping.char_limit]
     for optional in optional_columns:
@@ -294,6 +414,57 @@ def _unique_preserve(values: list[str]) -> list[str]:
         output.append(normalized)
 
     return output
+
+
+def _normalize_mode(value: str | None) -> str:
+    normalized = (value or "lp").strip().lower()
+    aliases = {
+        "lp": "lp",
+        "lp (single source)": "lp",
+        "change_source_update": "change_source_update",
+        "change file (old/new source)": "change_source_update",
+    }
+    if normalized not in aliases:
+        raise ValueError(f"Unsupported import mode: {value}")
+    return aliases[normalized]
+
+
+def _filter_unapproved_baseline_candidates(
+    *,
+    connection: Connection,
+    baseline_candidate_rows: list[dict[str, object]],
+    target_locale: str | None,
+) -> list[dict[str, object]]:
+    if not baseline_candidate_rows or not target_locale:
+        return baseline_candidate_rows
+
+    segment_ids = [str(row["segment_id"]) for row in baseline_candidate_rows]
+    approved_segment_ids = {
+        str(row[0])
+        for row in connection.execute(
+            text(
+                """
+                SELECT segment_id
+                FROM approved_translations
+                WHERE target_locale = :target_locale
+                  AND segment_id IN :segment_ids
+                """
+            ).bindparams(bindparam("segment_ids", expanding=True)),
+            {
+                "target_locale": target_locale,
+                "segment_ids": segment_ids,
+            },
+        ).all()
+    }
+
+    if not approved_segment_ids:
+        return baseline_candidate_rows
+
+    return [
+        row
+        for row in baseline_candidate_rows
+        if str(row["segment_id"]) not in approved_segment_ids
+    ]
 
 
 def _build_context_payload(row: pd.Series, context_columns: list[str]) -> dict[str, str | None]:
@@ -379,3 +550,10 @@ def _compute_row_index(original_index: object, position: int) -> int:
 
 def _to_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def _string_or_none(value: object) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None

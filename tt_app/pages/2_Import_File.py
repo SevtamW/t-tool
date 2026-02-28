@@ -55,6 +55,12 @@ except Exception as exc:  # noqa: BLE001
 st.write(f"Project: {project.name} ({project.slug})")
 st.write(f"Source locale for segments: {project.source_locale}")
 
+import_mode_label = st.selectbox(
+    "Import mode",
+    options=["LP (single source)", "Change file (OLD/NEW source)"],
+)
+import_mode = "lp" if import_mode_label == "LP (single source)" else "change_source_update"
+
 source_mode = st.radio("Input source", ["Upload file", "Local path"], horizontal=True)
 
 file_bytes: bytes | None = None
@@ -120,10 +126,33 @@ st.subheader("Preview")
 st.dataframe(preview_dataframe(dataframe, limit=20), use_container_width=True)
 
 st.subheader("Column Mapping")
-source_column = st.selectbox("Source column (required)", options=columns)
+if import_mode == "lp":
+    source_new_column = st.selectbox("Source column (required)", options=columns)
+    source_old_column = None
+else:
+    source_new_column = st.selectbox("Source NEW column (required)", options=columns)
+    source_old_column = st.selectbox("Source OLD column (required)", options=columns)
+
 target_column = _optional_selection(
     st.selectbox("Target column (optional)", options=[NONE_OPTION, *columns], index=0)
 )
+target_locale_options = [locale for locale in project.enabled_locales if locale != project.source_locale]
+target_locale_column: str | None = None
+if target_column:
+    if not target_locale_options:
+        st.error("No enabled target locales are available for baseline imports.")
+        st.stop()
+
+    default_target_locale = (
+        project.target_locale if project.target_locale in target_locale_options else target_locale_options[0]
+    )
+    target_locale_column = st.selectbox(
+        "Target locale for this column",
+        options=target_locale_options,
+        index=target_locale_options.index(default_target_locale),
+        help="This imports existing translations as baseline candidates (not approved).",
+    )
+
 cn_column = _optional_selection(
     st.selectbox("CN column (optional)", options=[NONE_OPTION, *columns], index=0)
 )
@@ -137,8 +166,11 @@ context_columns = st.multiselect("Additional context columns (optional)", option
 
 if st.button("Import", type="primary"):
     mapping = ColumnMapping(
-        source=source_column,
+        mode=import_mode,
+        source_new=source_new_column,
+        source_old=source_old_column,
         target=target_column,
+        target_locale=target_locale_column,
         cn=cn_column,
         key=key_column,
         char_limit=char_limit_column,

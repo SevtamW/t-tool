@@ -63,3 +63,30 @@ projects/<slug>/
 - `config.yml` stores non-secret settings only.
 - Secrets (API keys, tokens) are intentionally not stored in SQLite or plaintext config.
 - Planned future direction: OS keychain-backed secret handling (Ticket 6+).
+
+
+
+## Delete all projects
+
+```bash
+rm -rf ./projects
+```
+
+```bash
+SQLite:
+PRAGMA foreign_keys = OFF;
+DELETE FROM qa_flags;
+DELETE FROM approved_translations;
+DELETE FROM translation_candidates;
+DELETE FROM jobs;
+DELETE FROM segments;
+DELETE FROM schema_profiles;
+DELETE FROM assets;
+DELETE FROM tm_fts;
+DELETE FROM tm_entries;
+DELETE FROM glossary_terms;
+DELETE FROM project_locales;
+DELETE FROM projects;
+PRAGMA foreign_keys = ON;
+VACUUM;
+```

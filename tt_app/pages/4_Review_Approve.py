@@ -72,6 +72,14 @@ def _has_candidate_text(row: ReviewRow) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _candidate_label(row: ReviewRow) -> str:
+    if row.candidate_type == "existing_target":
+        return "Existing baseline"
+    if row.candidate_type:
+        return str(row.candidate_type)
+    return "Latest candidate"
+
+
 def _init_row_state(rows: list[ReviewRow], target_locale: str) -> None:
     for row in rows:
         edit_key = _edit_key(target_locale, row.segment_id)
@@ -210,8 +218,8 @@ st.write(
 
 if candidate_count == 0:
     st.warning(
-        "No generated translations were found for this asset/target locale yet. "
-        "Run a job for the same asset and target locale, then refresh."
+        "No candidate translations were found for this asset/target locale yet. "
+        "Import baseline translations or run a job for the same asset and target locale, then refresh."
     )
 
 if not filtered_rows and rows:
@@ -225,6 +233,7 @@ table_rows = [
         "row_index": row.row_index,
         "key": row.key,
         "source_text": row.source_text,
+        "candidate_type": row.candidate_type,
         "candidate_text": row.candidate_text,
         "approved_text": row.approved_text,
         "qa_flags": " | ".join(_row_qa_messages(row)),
@@ -271,7 +280,7 @@ for row in filtered_rows:
             f"Row {row.row_index} | Key: {row.key or '-'} | Sheet: {row.sheet_name or '-'} | Segment: {row.segment_id[:8]}"
         )
         st.write(f"Source: {row.source_text}")
-        st.write(f"Latest candidate: {row.candidate_text or '(none)'}")
+        st.write(f"{_candidate_label(row)}: {row.candidate_text or '(none)'}")
         st.write(f"Approved text: {row.approved_text or '(none)'}")
         row_qa_messages = _row_qa_messages(row)
         if row_qa_messages:
