@@ -40,6 +40,7 @@ def _discover_project_slugs(projects_root: Path) -> list[str]:
 
 
 st.title("Select Project")
+st.info("Create a new project in the 'Create Project' page.")
 
 current_root = st.session_state.get("projects_root", "./projects")
 root_input = st.text_input("Projects root folder", value=current_root)

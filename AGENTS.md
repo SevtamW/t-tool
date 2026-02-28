@@ -153,9 +153,13 @@ Use Python 3.11+.
 python -m pip install -e .
 python -m pip install -e ".[dev]"
 pytest
-streamlit run tt_app/streamlit_app.py
+streamlit run tt_app/app.py
 tt create-project "My Game" --source en-US --target de-DE --targets de-DE,fr-FR
 ```
+
+Additional contributor rule:
+- If a change adds or requires new dependencies, install them before validation.
+- After completing changes, always run the app locally (`streamlit run tt_app/app.py`) to verify it starts.
 
 ---
 

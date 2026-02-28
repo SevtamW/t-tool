@@ -52,7 +52,7 @@ projects/<slug>/
 ```bash
   source .venv/bin/activate
   pip install -e ".[dev]"
-  streamlit run tt_app/streamlit_app.py
+  streamlit run tt_app/app.py
 ```
 
 ## Notes

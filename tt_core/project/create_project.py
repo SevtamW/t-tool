@@ -86,6 +86,7 @@ def create_project(
     default_target_locale: str = "de-DE",
     targets: list[str] | None = None,
     root: Path | None = None,
+    global_game_glossary_enabled: bool = True,
 ) -> CreatedProject:
     project_slug = slugify(slug if slug is not None else name)
     projects_root = resolve_projects_root(root)
@@ -105,6 +106,7 @@ def create_project(
         default_source_locale=default_source_locale,
         default_target_locale=default_target_locale,
         enabled_locales=enabled_targets,
+        global_game_glossary_enabled=global_game_glossary_enabled,
     )
 
     config_path = project_config_path(project_path)
