@@ -19,6 +19,7 @@ dependencies = [
   "python-dateutil>=2.9",
   "rapidfuzz>=3.9",
   "keyring>=25.5",
+  "secretstorage>=3.3",
   "httpx>=0.28",
 ]
 

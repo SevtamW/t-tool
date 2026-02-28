@@ -32,8 +32,30 @@ except Exception:  # noqa: BLE001
     PasswordDeleteError = Exception
 
 
+def _python_keyring_status() -> tuple[bool, str | None]:
+    if keyring is None:
+        return False, None
+
+    if not hasattr(keyring, "get_keyring"):
+        return True, keyring.__class__.__name__
+
+    try:
+        backend = keyring.get_keyring()
+    except Exception:  # noqa: BLE001
+        return False, "unavailable"
+
+    if backend.__class__.__module__ == "keyring.backends.fail":
+        return False, "fail-backend"
+
+    return True, backend.__class__.__name__
+
+
 def _has_macos_security_cli() -> bool:
     return sys.platform == "darwin" and shutil.which("security") is not None
+
+
+def _has_linux_secret_tool() -> bool:
+    return sys.platform.startswith("linux") and shutil.which("secret-tool") is not None
 
 
 def _macos_set_secret(name: str, value: str) -> None:
@@ -101,6 +123,60 @@ def _macos_delete_secret(name: str) -> None:
         raise RuntimeError(f"macOS keychain delete failed: {details or 'unknown error'}")
 
 
+def _linux_secret_tool_attrs(name: str) -> list[str]:
+    return ["service", KEYRING_SERVICE_NAME, "account", name]
+
+
+def _linux_set_secret(name: str, value: str) -> None:
+    completed = subprocess.run(
+        [
+            "secret-tool",
+            "store",
+            "--label",
+            f"{KEYRING_SERVICE_NAME}: {name}",
+            *_linux_secret_tool_attrs(name),
+        ],
+        input=value,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(
+            f"Linux Secret Service write failed: {details or 'unknown error'}"
+        )
+
+
+def _linux_get_secret(name: str) -> str | None:
+    completed = subprocess.run(
+        ["secret-tool", "lookup", *_linux_secret_tool_attrs(name)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    value = completed.stdout.strip()
+    return value if value else None
+
+
+def _linux_delete_secret(name: str) -> None:
+    completed = subprocess.run(
+        ["secret-tool", "clear", *_linux_secret_tool_attrs(name)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout or "").strip()
+        if not details or "not found" in details.lower():
+            return
+        raise RuntimeError(
+            f"Linux Secret Service delete failed: {details or 'unknown error'}"
+        )
+
+
 @dataclass(slots=True, frozen=True)
 class TaskPolicy:
     provider: str
@@ -144,8 +220,9 @@ def set_secret(name: str, value: str) -> None:
     if not normalized:
         raise ValueError("Secret value must not be empty.")
 
+    keyring_available, _ = _python_keyring_status()
     keyring_error: Exception | None = None
-    if keyring is not None:
+    if keyring_available:
         try:
             keyring.set_password(KEYRING_SERVICE_NAME, name, normalized)
             return
@@ -156,16 +233,22 @@ def set_secret(name: str, value: str) -> None:
         _macos_set_secret(name, normalized)
         return
 
+    if _has_linux_secret_tool():
+        _linux_set_secret(name, normalized)
+        return
+
     if keyring_error is not None:
         raise RuntimeError(f"Secret storage failed: {keyring_error}") from keyring_error
     raise RuntimeError(
-        "No secret backend available. Install python keyring or use macOS Keychain."
+        "No secret backend available. Install a usable python keyring backend, "
+        "use macOS Keychain, or install `secret-tool` for Linux Secret Service."
     )
 
 
 def get_secret(name: str) -> str | None:
     value: str | None = None
-    if keyring is not None:
+    keyring_available, _ = _python_keyring_status()
+    if keyring_available:
         try:
             value = keyring.get_password(KEYRING_SERVICE_NAME, name)
         except Exception:  # noqa: BLE001
@@ -177,6 +260,12 @@ def get_secret(name: str) -> str | None:
         except Exception:  # noqa: BLE001
             value = None
 
+    if value is None and _has_linux_secret_tool():
+        try:
+            value = _linux_get_secret(name)
+        except Exception:  # noqa: BLE001
+            value = None
+
     if value is None:
         return None
     stripped = value.strip()
@@ -184,9 +273,10 @@ def get_secret(name: str) -> str | None:
 
 
 def delete_secret(name: str) -> None:
+    keyring_available, _ = _python_keyring_status()
     keyring_error: Exception | None = None
 
-    if keyring is not None:
+    if keyring_available:
         try:
             keyring.delete_password(KEYRING_SERVICE_NAME, name)
             return
@@ -199,27 +289,28 @@ def delete_secret(name: str) -> None:
         _macos_delete_secret(name)
         return
 
+    if _has_linux_secret_tool():
+        _linux_delete_secret(name)
+        return
+
     if keyring_error is not None:
         raise RuntimeError(f"Secret deletion failed: {keyring_error}") from keyring_error
 
 
 def has_secret_backend() -> bool:
-    return keyring is not None or _has_macos_security_cli()
+    keyring_available, _ = _python_keyring_status()
+    return keyring_available or _has_macos_security_cli() or _has_linux_secret_tool()
 
 
 def describe_secret_backend() -> str:
     descriptions: list[str] = []
-    if keyring is not None:
-        backend_name = "unknown"
-        if hasattr(keyring, "get_keyring"):
-            try:
-                backend = keyring.get_keyring()
-                backend_name = backend.__class__.__name__
-            except Exception:  # noqa: BLE001
-                backend_name = "unavailable"
-        descriptions.append(f"python-keyring:{backend_name}")
+    _, keyring_description = _python_keyring_status()
+    if keyring_description is not None:
+        descriptions.append(f"python-keyring:{keyring_description}")
     if _has_macos_security_cli():
         descriptions.append("macOS-Keychain:security-cli")
+    if _has_linux_secret_tool():
+        descriptions.append("linux-secret-service:secret-tool")
     if not descriptions:
         return "none"
     return ", ".join(descriptions)

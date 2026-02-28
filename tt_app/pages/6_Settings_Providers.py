@@ -59,12 +59,15 @@ except Exception as exc:  # noqa: BLE001
     st.error(f"Unable to load selected project: {exc}")
     st.stop()
 
-st.warning("API keys are stored in OS Keychain via keyring and are not written to disk.")
+st.warning("API keys are stored in the OS keychain or secret service and are not written to disk.")
 backend_description = describe_secret_backend()
 backend_available = has_secret_backend()
 st.caption(f"Detected secret backend: {backend_description}")
 if not backend_available:
-    st.error("No keychain backend detected. Install `keyring` or use macOS Keychain.")
+    st.error(
+        "No usable secret backend detected. Install a working `keyring` backend, "
+        "use macOS Keychain, or install `secret-tool` on Linux."
+    )
 
 st.subheader("OpenAI API Key")
 openai_key_input = st.text_input("openai_api_key", type="password", value="")

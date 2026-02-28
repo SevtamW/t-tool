@@ -117,6 +117,18 @@ def _approve_row(*, db_path: Path, row: ReviewRow, target_locale: str) -> bool:
     return True
 
 
+def _approve_rows(*, db_path: Path, rows: list[ReviewRow], target_locale: str) -> int:
+    saved = 0
+    for row in rows:
+        if _approve_row(
+            db_path=db_path,
+            row=row,
+            target_locale=target_locale,
+        ):
+            saved += 1
+    return saved
+
+
 st.title("Review & Approve")
 
 selected_slug = st.session_state.get("selected_project_slug")
@@ -221,22 +233,36 @@ table_rows = [
 ]
 st.dataframe(table_rows, use_container_width=True)
 
-if st.button("Approve selected", type="primary"):
-    saved = 0
-    for row in filtered_rows:
-        if st.session_state.get(_bulk_key(selected_target_locale, row.segment_id), False):
-            if _approve_row(
-                db_path=db_path,
-                row=row,
-                target_locale=selected_target_locale,
-            ):
-                saved += 1
+approve_selected_col, approve_all_col = st.columns(2)
+approve_selected_clicked = approve_selected_col.button("Approve selected", type="primary")
+approve_all_clicked = approve_all_col.button("Approve all")
 
-    if saved > 0:
-        st.success(f"Approved {saved} row(s).")
-        st.rerun()
+if approve_selected_clicked or approve_all_clicked:
+    if approve_all_clicked:
+        rows_to_approve = filtered_rows
     else:
-        st.info("No rows selected for bulk approval.")
+        rows_to_approve = [
+            row
+            for row in filtered_rows
+            if st.session_state.get(_bulk_key(selected_target_locale, row.segment_id), False)
+        ]
+
+    if not rows_to_approve:
+        if approve_all_clicked:
+            st.info("No visible rows to approve.")
+        else:
+            st.info("No rows selected for bulk approval.")
+    else:
+        saved = _approve_rows(
+            db_path=db_path,
+            rows=rows_to_approve,
+            target_locale=selected_target_locale,
+        )
+        if saved > 0:
+            st.success(f"Approved {saved} row(s).")
+            st.rerun()
+        if approve_all_clicked and saved == 0:
+            st.info("No visible rows could be approved.")
 
 st.subheader("Edit and approve per row")
 for row in filtered_rows:

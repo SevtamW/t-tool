@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -32,11 +33,97 @@ class _FakeKeyring:
         self._store.pop((service, name), None)
 
 
+class _FailBackend:
+    __module__ = "keyring.backends.fail"
+
+
+class _FailKeyring:
+    def get_keyring(self) -> _FailBackend:
+        return _FailBackend()
+
+    def set_password(self, service: str, name: str, value: str) -> None:
+        raise AssertionError("fail backend should not be used for writes")
+
+    def get_password(self, service: str, name: str) -> str | None:
+        raise AssertionError("fail backend should not be used for reads")
+
+    def delete_password(self, service: str, name: str) -> None:
+        raise AssertionError("fail backend should not be used for deletes")
+
+
 @pytest.fixture
 def fake_keyring(monkeypatch: pytest.MonkeyPatch) -> _FakeKeyring:
     fake = _FakeKeyring()
     monkeypatch.setattr(policy_module, "keyring", fake)
     return fake
+
+
+def test_fail_keyring_backend_is_not_treated_as_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(policy_module, "keyring", _FailKeyring())
+    monkeypatch.setattr(policy_module.sys, "platform", "linux")
+    monkeypatch.setattr(policy_module.shutil, "which", lambda name: None)
+
+    assert policy_module.has_secret_backend() is False
+    assert policy_module.describe_secret_backend() == "python-keyring:fail-backend"
+
+
+def test_linux_secret_tool_fallback_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(policy_module, "keyring", _FailKeyring())
+    monkeypatch.setattr(policy_module.sys, "platform", "linux")
+    monkeypatch.setattr(
+        policy_module.shutil,
+        "which",
+        lambda name: "/usr/bin/secret-tool" if name == "secret-tool" else None,
+    )
+
+    store: dict[tuple[tuple[str, str], ...], str] = {}
+
+    def _attrs(parts: list[str]) -> tuple[tuple[str, str], ...]:
+        return tuple((parts[index], parts[index + 1]) for index in range(0, len(parts), 2))
+
+    def fake_run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        check: bool,
+        input: str | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del capture_output, text, check
+
+        if args[:2] == ["secret-tool", "store"]:
+            attrs = _attrs(args[4:])
+            store[attrs] = input or ""
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ["secret-tool", "lookup"]:
+            attrs = _attrs(args[2:])
+            value = store.get(attrs)
+            if value is None:
+                return subprocess.CompletedProcess(args, 1, "", "")
+            return subprocess.CompletedProcess(args, 0, value, "")
+        if args[:2] == ["secret-tool", "clear"]:
+            attrs = _attrs(args[2:])
+            store.pop(attrs, None)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected subprocess call: {args}")
+
+    monkeypatch.setattr(policy_module.subprocess, "run", fake_run)
+
+    assert policy_module.has_secret_backend() is True
+    assert (
+        policy_module.describe_secret_backend()
+        == "python-keyring:fail-backend, linux-secret-service:secret-tool"
+    )
+
+    policy_module.set_secret("openai_api_key", "sk-test-ubuntu")
+    assert policy_module.get_secret("openai_api_key") == "sk-test-ubuntu"
+
+    policy_module.delete_secret("openai_api_key")
+    assert policy_module.get_secret("openai_api_key") is None
 
 
 def _setup_project(tmp_path: Path, name: str) -> tuple[Path, object]:
@@ -301,4 +388,3 @@ def test_placeholder_qa_flags_still_work_with_llm_pipeline(
     assert rows
     assert any(row[0] == "placeholder_mismatch" for row in rows)
     assert any("Missing placeholder" in row[1] for row in rows)
-
