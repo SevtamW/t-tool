@@ -41,7 +41,7 @@ from tt_core.qa.placeholder_firewall import (
     protect_text,
     reinject,
 )
-from tt_core.review.review_service import upsert_candidate
+from tt_core.review.review_service import upsert_candidate, upsert_change_proposal
 from tt_core.tm.tm_search import find_exact, search_fuzzy
 from tt_core.tm.tm_store import record_tm_use
 
@@ -65,6 +65,7 @@ class JobRunSummary:
     keep_count: int = 0
     update_count: int = 0
     flag_count: int = 0
+    proposals_created: int = 0
 
 
 @dataclass(slots=True)
@@ -252,6 +253,27 @@ def classify_change(old: str, new: str) -> ChangeClassification:
         confidence=45,
         reason="Source change needs manual review.",
     )
+
+
+def _change_variant_a_issue() -> QAIssue:
+    return QAIssue(
+        issue_type="stale_source_change",
+        severity="warn",
+        message="Source changed from OLD to NEW. Proposed updated target for review.",
+        span={
+            "decision": "UPDATE",
+            "confidence": 50,
+            "reason": "Source changed from OLD to NEW.",
+        },
+    )
+
+
+def _change_proposal_score(generated: _GeneratedCandidate) -> float:
+    if generated.candidate_type == "tm_exact":
+        return 1.0
+    if generated.candidate_type == "tm_fuzzy":
+        return generated.score
+    return 0.5
 
 
 def _replace_qa_flags(
@@ -948,6 +970,197 @@ def run_mock_translation_job(
         target_locale=target_locale,
         processed_segments=processed,
         status="done",
+    )
+
+
+def run_change_variant_a_job(
+    *,
+    db_path: Path,
+    project_id: str,
+    asset_id: str,
+    target_locale: str,
+    decision_trace: dict[str, object] | None = None,
+    translator: Callable[[str, str], str] | None = None,
+    provider_factory: Callable[[str, str], LLMProvider] | None = None,
+    strict_provider_selection: bool = False,
+) -> JobRunSummary:
+    mapping_signature = _latest_mapping_signature(db_path=db_path, project_id=project_id)
+    merged_trace = dict(decision_trace or {})
+    merged_trace.setdefault("selected_asset_id", asset_id)
+    merged_trace.setdefault("mapping_signature", mapping_signature)
+
+    job_id = create_job(
+        db_path=db_path,
+        project_id=project_id,
+        asset_id=asset_id,
+        target_locale=target_locale,
+        job_type="change_variant_a",
+        decision_trace=merged_trace,
+    )
+
+    update_job_status(
+        db_path=db_path,
+        job_id=job_id,
+        status="running",
+        summary="Change fill job is running",
+        set_started_at=True,
+    )
+
+    include_global_glossary = _is_global_glossary_enabled(db_path=Path(db_path))
+    style_hints = _load_style_hints(db_path=Path(db_path))
+    policy: ModelPolicy = load_policy(Path(db_path).parent)
+    provider_factory_fn = provider_factory or _default_provider_factory
+
+    if translator is None:
+        resolved_translator_provider = _resolve_provider(
+            task=TASK_TRANSLATOR,
+            task_policy=policy.translator,
+            provider_factory=provider_factory_fn,
+            strict_provider_selection=strict_provider_selection,
+        )
+    else:
+        resolved_translator_provider = _ResolvedProvider(
+            task=TASK_TRANSLATOR,
+            provider_name="legacy_callable",
+            model="callable",
+            provider=_LegacyTranslatorProvider(translator=translator, target_locale=target_locale),
+        )
+
+    resolved_reviewer_provider = _resolve_provider(
+        task=TASK_REVIEWER,
+        task_policy=policy.reviewer,
+        provider_factory=provider_factory_fn,
+        strict_provider_selection=strict_provider_selection,
+    )
+
+    changed_segments = 0
+    proposals_created = 0
+
+    engine = initialize_database(Path(db_path))
+    try:
+        with engine.begin() as connection:
+            glossary_terms = load_must_use_terms(
+                connection=connection,
+                project_id=project_id,
+                locale_code=target_locale,
+                include_global=include_global_glossary,
+            )
+            segment_rows = connection.execute(
+                text(
+                    """
+                    SELECT id, source_locale, source_text, source_text_old, char_limit
+                    FROM segments
+                    WHERE asset_id = :asset_id
+                    ORDER BY row_index, id
+                    """
+                ),
+                {"asset_id": asset_id},
+            ).all()
+
+            for row in segment_rows:
+                segment_id = str(row[0])
+                source_locale = str(row[1])
+                source_text = str(row[2])
+                source_text_old = str(row[3]) if row[3] is not None else None
+                char_limit = int(row[4]) if row[4] is not None else None
+
+                protected_source = protect_text(source_text)
+                connection.execute(
+                    text(
+                        """
+                        UPDATE segments
+                        SET placeholders_json = :placeholders_json
+                        WHERE id = :segment_id
+                        """
+                    ),
+                    {
+                        "segment_id": segment_id,
+                        "placeholders_json": _placeholder_payload(protected_source.placeholders),
+                    },
+                )
+
+                if source_text_old is None or source_text_old.strip() == source_text.strip():
+                    continue
+
+                changed_segments += 1
+                generated = _generate_translation_candidate(
+                    connection=connection,
+                    project_id=project_id,
+                    source_locale=source_locale,
+                    source_text=source_text,
+                    target_locale=target_locale,
+                    char_limit=char_limit,
+                    glossary_terms=glossary_terms,
+                    translator_provider=resolved_translator_provider,
+                    reviewer_provider=resolved_reviewer_provider,
+                    style_hints=style_hints,
+                )
+                _replace_qa_flags(
+                    connection=connection,
+                    segment_id=segment_id,
+                    target_locale=target_locale,
+                    issues=[_change_variant_a_issue(), *generated.qa_issues],
+                )
+                upsert_change_proposal(
+                    connection=connection,
+                    segment_id=segment_id,
+                    target_locale=target_locale,
+                    text=generated.candidate_text,
+                    score=_change_proposal_score(generated),
+                    model_info={
+                        **generated.model_info,
+                        "source_candidate_type": generated.candidate_type,
+                        "workflow": "change_variant_a",
+                    },
+                )
+                proposals_created += 1
+    except Exception as exc:
+        update_job_status(
+            db_path=db_path,
+            job_id=job_id,
+            status="failed",
+            summary=f"Job failed: {exc}",
+            set_finished_at=True,
+        )
+        raise
+    finally:
+        engine.dispose()
+
+    final_trace = {
+        **merged_trace,
+        "summary_counts": {
+            "changed_rows": changed_segments,
+            "proposals_created": proposals_created,
+        },
+    }
+    _update_job_decision_trace(
+        db_path=db_path,
+        job_id=job_id,
+        decision_trace=final_trace,
+    )
+
+    update_job_status(
+        db_path=db_path,
+        job_id=job_id,
+        status="done",
+        summary=(
+            f"Processed {changed_segments} changed segment(s) for {target_locale} "
+            f"(proposals={proposals_created})"
+        ),
+        set_finished_at=True,
+    )
+
+    return JobRunSummary(
+        job_id=job_id,
+        project_id=project_id,
+        asset_id=asset_id,
+        target_locale=target_locale,
+        processed_segments=proposals_created,
+        status="done",
+        job_type="change_variant_a",
+        changed_segments=changed_segments,
+        update_count=proposals_created,
+        proposals_created=proposals_created,
     )
 
 

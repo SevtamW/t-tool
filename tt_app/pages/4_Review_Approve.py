@@ -66,6 +66,8 @@ def _apply_filter(rows: list[ReviewRow], filter_option: str) -> list[ReviewRow]:
         return [row for row in rows if _row_has_qa_flags(row)]
     if filter_option == "Only changed (stale)":
         return [row for row in rows if row.is_changed]
+    if filter_option == "Only change proposals (Variant A)":
+        return [row for row in rows if row.proposed_type == "change_proposed"]
     return rows
 
 
@@ -221,6 +223,7 @@ filter_options = [
     "show only approved",
     "Only rows with QA flags",
     "Only changed (stale)",
+    "Only change proposals (Variant A)",
 ]
 if "review_filter_option" not in st.session_state:
     st.session_state["review_filter_option"] = "show all"
@@ -333,7 +336,7 @@ for row in filtered_rows:
             height=120,
         )
 
-        action_proposed_col, action_keep_col, action_edit_col = st.columns(3)
+        action_proposed_col, action_keep_col, action_edit_col, action_skip_col = st.columns(4)
         if action_proposed_col.button(
             "Approve proposed",
             key=f"approve_proposed_{selected_target_locale}_{row.segment_id}",
@@ -371,6 +374,11 @@ for row in filtered_rows:
             ):
                 st.success(f"Row {row.row_index} approved.")
                 st.rerun()
+        if action_skip_col.button(
+            "Skip",
+            key=f"skip_row_{selected_target_locale}_{row.segment_id}",
+        ):
+            st.info(f"Row {row.row_index} skipped.")
 
         st.checkbox(
             "Select for bulk approve",

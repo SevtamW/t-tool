@@ -18,9 +18,13 @@ def _ensure_repo_root_on_path() -> None:
 
 _ensure_repo_root_on_path()
 
-from tt_core.jobs.job_service import run_change_variant_b_job, run_mock_translation_job
+from tt_core.jobs.job_service import (
+    run_change_variant_a_job,
+    run_change_variant_b_job,
+    run_mock_translation_job,
+)
 from tt_core.project.create_project import load_project_info
-from tt_core.review.review_service import list_assets, list_segments
+from tt_core.review.review_service import list_assets, list_changed_segments, list_segments
 
 
 def _asset_label(asset_id: str, original_name: str | None, received_at: str) -> str:
@@ -28,6 +32,7 @@ def _asset_label(asset_id: str, original_name: str | None, received_at: str) -> 
 
 
 LAST_JOB_SUMMARY_KEY = "run_job_last_summary"
+LAST_CHANGE_VARIANT_A_JOB_SUMMARY_KEY = "run_change_variant_a_job_last_summary"
 LAST_CHANGE_JOB_SUMMARY_KEY = "run_change_job_last_summary"
 
 
@@ -73,17 +78,13 @@ selected_target_locale = st.selectbox(
 
 segments = list_segments(db_path=db_path, asset_id=selected_asset_id)
 segment_count = len(segments)
-changed_count = sum(
-    1
-    for segment in segments
-    if segment.source_text_old is not None
-    and str(segment.source_text_old).strip() != segment.source_text.strip()
-)
+changed_count = len(list_changed_segments(db_path=db_path, asset_id=selected_asset_id))
 st.write(f"Segments in selected asset: {segment_count} | Changed rows: {changed_count}")
 
-translation_col, change_col = st.columns(2)
+translation_col, change_a_col, change_b_col = st.columns(3)
 run_translation_clicked = translation_col.button("Run translation", type="primary")
-run_change_clicked = change_col.button("Run Change Review (Variant B)")
+run_change_variant_a_clicked = change_a_col.button("Run Change Job (Variant A)")
+run_change_clicked = change_b_col.button("Run Change Review (Variant B)")
 
 if run_translation_clicked:
     try:
@@ -107,6 +108,32 @@ if run_translation_clicked:
         "target_locale": result.target_locale,
         "job_id": result.job_id,
         "processed_segments": result.processed_segments,
+        "status": result.status,
+    }
+
+if run_change_variant_a_clicked:
+    try:
+        with st.spinner("Running change fill job..."):
+            result = run_change_variant_a_job(
+                db_path=db_path,
+                project_id=project.project_id,
+                asset_id=selected_asset_id,
+                target_locale=selected_target_locale,
+                decision_trace={"page": "3_Run_Job", "mode": "change_variant_a"},
+            )
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Failed to run change fill job: {exc}")
+        st.stop()
+
+    st.session_state["selected_asset_id"] = selected_asset_id
+    st.session_state["selected_target_locale"] = selected_target_locale
+    st.session_state[LAST_CHANGE_VARIANT_A_JOB_SUMMARY_KEY] = {
+        "project_slug": project.slug,
+        "asset_id": selected_asset_id,
+        "target_locale": result.target_locale,
+        "job_id": result.job_id,
+        "changed_segments": result.changed_segments,
+        "proposals_created": result.proposals_created,
         "status": result.status,
     }
 
@@ -151,6 +178,20 @@ if (
     st.write(f"Target locale: {last_job_summary['target_locale']}")
     st.write(f"Segments processed: {last_job_summary['processed_segments']}")
     st.write(f"Status: {last_job_summary['status']}")
+
+last_change_variant_a_job_summary = st.session_state.get(LAST_CHANGE_VARIANT_A_JOB_SUMMARY_KEY)
+if (
+    isinstance(last_change_variant_a_job_summary, dict)
+    and last_change_variant_a_job_summary.get("project_slug") == project.slug
+    and last_change_variant_a_job_summary.get("asset_id") == selected_asset_id
+    and last_change_variant_a_job_summary.get("target_locale") == selected_target_locale
+):
+    st.success("Change fill job completed")
+    st.caption("Last completed change fill")
+    st.write(f"Job ID: {last_change_variant_a_job_summary['job_id']}")
+    st.write(f"Changed rows: {last_change_variant_a_job_summary['changed_segments']}")
+    st.write(f"Proposals created: {last_change_variant_a_job_summary['proposals_created']}")
+    st.write(f"Status: {last_change_variant_a_job_summary['status']}")
 
 last_change_job_summary = st.session_state.get(LAST_CHANGE_JOB_SUMMARY_KEY)
 if (

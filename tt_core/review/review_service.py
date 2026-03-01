@@ -153,6 +153,41 @@ def list_segments(*, db_path: Path, asset_id: str) -> list[SegmentRow]:
     ]
 
 
+def list_changed_segments(*, db_path: Path, asset_id: str) -> list[SegmentRow]:
+    engine = initialize_database(Path(db_path))
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT id, asset_id, row_index, key, source_text, source_text_old, cn_text, sheet_name
+                    FROM segments
+                    WHERE asset_id = :asset_id
+                      AND source_text_old IS NOT NULL
+                      AND TRIM(source_text_old) <> TRIM(source_text)
+                    ORDER BY row_index, id
+                    """
+                ),
+                {"asset_id": asset_id},
+            ).all()
+    finally:
+        engine.dispose()
+
+    return [
+        SegmentRow(
+            id=str(row[0]),
+            asset_id=str(row[1]),
+            row_index=row[2],
+            key=row[3],
+            source_text=str(row[4]),
+            source_text_old=row[5],
+            cn_text=row[6],
+            sheet_name=row[7],
+        )
+        for row in rows
+    ]
+
+
 def _upsert_candidate_on_connection(
     connection: Connection,
     *,
@@ -278,6 +313,34 @@ def upsert_candidate(
             )
     finally:
         engine.dispose()
+
+
+def upsert_change_proposal(
+    *,
+    db_path: Path | None = None,
+    connection: Connection | None = None,
+    segment_id: str,
+    target_locale: str,
+    text: str,
+    model_info: dict[str, object] | None = None,
+    score: float = 0.5,
+    generated_at: str | None = None,
+) -> str:
+    model_payload = None
+    if model_info is not None:
+        model_payload = {str(key): str(value) for key, value in model_info.items()}
+
+    return upsert_candidate(
+        db_path=db_path,
+        connection=connection,
+        segment_id=segment_id,
+        target_locale=target_locale,
+        candidate_text=text,
+        candidate_type="change_proposed",
+        score=score,
+        model_info=model_payload,
+        generated_at=generated_at,
+    )
 
 
 def get_latest_candidate(*, db_path: Path, segment_id: str, target_locale: str) -> CandidateRow | None:
@@ -411,6 +474,47 @@ def upsert_approved_translation(
     if id_row is None:
         raise RuntimeError("Failed to persist approved translation")
     return str(id_row[0])
+
+
+def list_proposals_for_asset(*, db_path: Path, asset_id: str, target_locale: str) -> list[CandidateRow]:
+    engine = initialize_database(Path(db_path))
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                text(
+                    """
+                    SELECT
+                        tc.id,
+                        tc.segment_id,
+                        tc.target_locale,
+                        tc.candidate_text,
+                        tc.candidate_type,
+                        tc.generated_at
+                    FROM translation_candidates AS tc
+                    INNER JOIN segments AS s
+                        ON s.id = tc.segment_id
+                    WHERE s.asset_id = :asset_id
+                      AND tc.target_locale = :target_locale
+                      AND tc.candidate_type = 'change_proposed'
+                    ORDER BY s.row_index, tc.generated_at, tc.id
+                    """
+                ),
+                {"asset_id": asset_id, "target_locale": target_locale},
+            ).all()
+    finally:
+        engine.dispose()
+
+    return [
+        CandidateRow(
+            id=str(row[0]),
+            segment_id=str(row[1]),
+            target_locale=str(row[2]),
+            candidate_text=str(row[3]),
+            candidate_type=str(row[4]),
+            generated_at=str(row[5]),
+        )
+        for row in rows
+    ]
 
 
 def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> list[ReviewRow]:

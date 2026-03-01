@@ -1,23 +1,25 @@
 # Prompt Archive
 
-Reformatted with Markdown headings so the ticket prompts are easier to scan and jump between.
+This archive keeps the original build prompts in one place, organized for faster scanning and reuse.
 
 ## Quick Navigation
 
-- Full MVP Prompt
-- Ticket Prompts
-- TICKET 1: WALKING SKELETON FOUNDATION (NO FEATURES)
-- TICKET 2: IMPORT XLSX/CSV + MANUAL COLUMN MAPPING + STORE SEGMENTS
-- TICKET 3: RUN JOB (MOCK) -> REVIEW/APPROVE -> EXPORT PATCH
-- TICKET 3b: EXPORT LP COPY WITH "NEW <LANG>" COLUMN
-- TICKET 4: PLACEHOLDER FIREWALL + QA FLAGS (FOUNDATION)
-- TICKET 5: GLOSSARY MUST-USE (MATCHING + ENFORCEMENT)
-- TICKET 6: TM STORE + SEARCH (FTS5) + AUTO-LEARN FROM APPROVALS
-- TICKET 7: LLM PROVIDER LAYER + KEYRING SETTINGS + TRANSLATION VIA LLM
-- TICKET 8: IMPORT v2 (EXISTING TARGET BASELINE + SOURCE OLD/NEW SUPPORT)
-- TICKET 8b: CREATE PROJECT IN STREAMLIT UI
-- TICKET 9: CHANGE-FILE VARIANT B (STALE + KEEP/UPDATE/FLAG + REVIEW + NEW COLUMN EXPORT)
+- [Full MVP Prompt](#full-mvp-prompt)
+- [Ticket Prompts](#ticket-prompts)
+- [Ticket 1: Walking Skeleton Foundation](#ticket-1)
+- [Ticket 2: Import XLSX/CSV + Manual Column Mapping + Store Segments](#ticket-2)
+- [Ticket 3: Run Job (Mock) -> Review/Approve -> Export Patch](#ticket-3)
+- [Ticket 3b: Export LP Copy With "NEW <LANG>" Column](#ticket-3b)
+- [Ticket 4: Placeholder Firewall + QA Flags](#ticket-4)
+- [Ticket 5: Glossary Must-Use](#ticket-5)
+- [Ticket 6: TM Store + Search (FTS5)](#ticket-6)
+- [Ticket 7: LLM Provider Layer + Keyring Settings](#ticket-7)
+- [Ticket 8: Import v2](#ticket-8)
+- [Ticket 8b: Create Project in Streamlit UI](#ticket-8b)
+- [Ticket 9: Change-File Variant B](#ticket-9)
+- [Ticket 10: Change-File Variant A](#ticket-10)
 
+<a id="full-mvp-prompt"></a>
 ## Full MVP Prompt
 
 You are Codex, an expert product + software architect and senior full-stack engineer. Build a working MVP of a “Translation Tool” for game localization automation.
@@ -29,137 +31,81 @@ You are starting in an EMPTY directory. Create the entire repository: code, test
 Build a local-first, cross-platform-friendly MVP for translators that:
 
 - Imports game “Language Pack” spreadsheets (XLSX/CSV) with varying column names/order and multiple languages.
-
 - Supports EN -> any target language (DE/FR/ES/PT/IT etc.). Target language(s) are selectable per job.
-
 - Enforces consistency via:
-
-- Project-specific Translation Memory (TM) (approved translations)
-
-- Project-specific Glossary (must-use terms)
-
-- Optional small Global Game Glossary (ATK/HP/DMG etc.) shared across projects
-
+  - Project-specific Translation Memory (TM) (approved translations)
+  - Project-specific Glossary (must-use terms)
+  - Optional small Global Game Glossary (ATK/HP/DMG etc.) shared across projects
 - Handles change-file variants (source OLD/NEW, targets either NEW columns or existing target columns).
-
 - Provides QA gates (placeholders/tags/numbers/length limits/terminology) and a review UI to approve per-row.
-
 - Learns safely: only approved outputs go into TM automatically; glossary/pattern rules are suggested and require explicit approval.
-
 - Includes an “agentic” layer ONLY for ambiguity resolution (schema mapping, routing, disambiguation), not for blind writing.
 
 MVP UI language: English only.
 
 ### KEY AGREEMENTS / CONSTRAINTS
 
-Local-first storage:
-
-- Use SQLite as the single source of truth per project (one DB per project folder).
-
-- Do NOT store photos/videos inside the DB. Store only paths/hashes + derived findings (OCR text snippets, timestamps, etc.).
-
-- Provide export of “ALL” as XLSX/TMX-style export (simple MVP export acceptable). “ALL.xlsx” becomes an export artifact, not the working store.
-
-Security:
-
-- Do NOT store API keys in SQLite or plaintext config files.
-
-- Store API keys in OS credential storage via Python `keyring`.
-
-- Support “BYOK” (Bring Your Own Key): user supplies their own OpenAI/other API keys.
-
-- Provide option to use local LLMs (later), but implement the abstraction now.
-
-LLM usage:
-
-- LLM calls are used for:
-
-1) Translation draft (when not filled by TM/glossary)
-
-2) Optional post-edit/review pass, but ONLY when risk score warrants it
-
-3) Schema/column mapping resolution when heuristics are uncertain
-
-4) Optional small routing/disambiguation tasks
-
-- Do NOT run a second “review LLM” for every segment by default. Use risk scoring + gates.
-
-Determinism + intelligence:
-
-- Deterministic rules always run (placeholder firewall, QA checks, must-use terminology).
-
-- “Agent” is a resolver: it decides what to do only when the situation is unclear; all write actions are controlled, validated, and auditable.
-
-Approval & locking:
-
-- User can approve individual rows (and leave others unapproved).
-
-- User can edit within a row (change a word).
-
-- Approved outputs are not overwritten by default.
-
-- If source changes, mark translations as “STALE” and queue for review.
-
-- Optional “Pin/Lock” exists but must NOT require manual row-by-row locking. Provide row-level pin and bulk pin rules (by key prefix, manual-edited, glossary-derived, etc.).
-
-Terminology nuance:
-
-- Avoid false positives like matching “DMG” inside unrelated substrings.
-
-- Glossary terms must support match policies: whole-token, case-sensitive, allow_compounds, compound_strategy, negative patterns.
-
-- Compounds like “DMGBoost” should be handled via rules + intelligent transformation when needed.
-
-Scalability:
-
-- Must handle large spreadsheets (e.g., LP 120,000 rows; glossary 4,000; TM 30,000+) smoothly.
-
-- Use bulk imports, proper indices, WAL mode, and FTS5 for fast text search in TM.
+- **Local-first storage**
+  - Use SQLite as the single source of truth per project (one DB per project folder).
+  - Do NOT store photos/videos inside the DB. Store only paths/hashes + derived findings (OCR text snippets, timestamps, etc.).
+  - Provide export of “ALL” as XLSX/TMX-style export (simple MVP export acceptable). “ALL.xlsx” becomes an export artifact, not the working store.
+- **Security**
+  - Do NOT store API keys in SQLite or plaintext config files.
+  - Store API keys in OS credential storage via Python `keyring`.
+  - Support “BYOK” (Bring Your Own Key): user supplies their own OpenAI/other API keys.
+  - Provide option to use local LLMs (later), but implement the abstraction now.
+- **LLM usage**
+  - LLM calls are used for:
+    1. Translation draft (when not filled by TM/glossary)
+    2. Optional post-edit/review pass, but ONLY when risk score warrants it
+    3. Schema/column mapping resolution when heuristics are uncertain
+    4. Optional small routing/disambiguation tasks
+  - Do NOT run a second “review LLM” for every segment by default. Use risk scoring + gates.
+- **Determinism + intelligence**
+  - Deterministic rules always run (placeholder firewall, QA checks, must-use terminology).
+  - “Agent” is a resolver: it decides what to do only when the situation is unclear; all write actions are controlled, validated, and auditable.
+- **Approval & locking**
+  - User can approve individual rows (and leave others unapproved).
+  - User can edit within a row (change a word).
+  - Approved outputs are not overwritten by default.
+  - If source changes, mark translations as “STALE” and queue for review.
+  - Optional “Pin/Lock” exists but must NOT require manual row-by-row locking. Provide row-level pin and bulk pin rules (by key prefix, manual-edited, glossary-derived, etc.).
+- **Terminology nuance**
+  - Avoid false positives like matching “DMG” inside unrelated substrings.
+  - Glossary terms must support match policies: whole-token, case-sensitive, allow_compounds, compound_strategy, negative patterns.
+  - Compounds like “DMGBoost” should be handled via rules + intelligent transformation when needed.
+- **Scalability**
+  - Must handle large spreadsheets (e.g., LP 120,000 rows; glossary 4,000; TM 30,000+) smoothly.
+  - Use bulk imports, proper indices, WAL mode, and FTS5 for fast text search in TM.
 
 ### DELIVERABLES
 
 Create:
 
-1) A Python package for the core engine (`tt_core/`) and a Streamlit MVP UI (`tt_app/`).
-
-2) A CLI (`tt_cli`) for basic operations (create project, import, run job, export).
-
-3) A clean data model in SQLite with migrations or create-on-first-run.
-
-4) Unit tests (pytest) for core logic (placeholder firewall, glossary match, QA, schema mapping decisions, TM insert/retrieval).
-
-5) A README with setup and usage instructions.
-
-6) Implement a future-ready “Messaging/Connectors” abstraction (stubs only) to support channels like WhatsApp, Email, Feishu later.
-
-	- Must be job-centric (Translation Ops Bot), not a general-purpose assistant.
-
-	- In MVP: provide a LocalConsoleConnector and a FileDropConnector only.
+1. A Python package for the core engine (`tt_core/`) and a Streamlit MVP UI (`tt_app/`).
+2. A CLI (`tt_cli`) for basic operations (create project, import, run job, export).
+3. A clean data model in SQLite with migrations or create-on-first-run.
+4. Unit tests (pytest) for core logic (placeholder firewall, glossary match, QA, schema mapping decisions, TM insert/retrieval).
+5. A README with setup and usage instructions.
+6. Implement a future-ready “Messaging/Connectors” abstraction (stubs only) to support channels like WhatsApp, Email, Feishu later.
+   - Must be job-centric (Translation Ops Bot), not a general-purpose assistant.
+   - In MVP: provide a `LocalConsoleConnector` and a `FileDropConnector` only.
 
 ### TECH STACK (MVP)
 
 Python 3.11+
 
 - streamlit (UI)
-
 - pandas + openpyxl (xlsx import/export)
-
 - SQLModel or SQLAlchemy (ORM) + SQLite
-
 - sqlite FTS5 (for TM search)
-
 - rapidfuzz (fuzzy match)
-
 - pydantic (schemas)
-
 - keyring (secure key storage)
-
 - typer (CLI)
 
 Optional but helpful:
-
 - python-dotenv (optional env var support for power users)
-
 - opencv-python / pytesseract is NOT required in MVP tests; implement media scan structure and simple image OCR integration as optional plugin (stub + interface). If OCR libs are unavailable, degrade gracefully.
 
 ### REPO STRUCTURE (create this)
@@ -625,8 +571,10 @@ You are starting in an EMPTY directory. Create a runnable repository skeleton wi
 
 - Keep the codebase extensible for future features (TM, glossary, QA, jobs, schema profiles, etc.).
 
+<a id="ticket-prompts"></a>
 ## Ticket Prompts
 
+<a id="ticket-1"></a>
 ### TICKET 1: WALKING SKELETON FOUNDATION (NO FEATURES)
 
 
@@ -1163,6 +1111,7 @@ You already have Ticket 1: local-first project creation (project folder + SQLite
 Now add an MVP importer for XLSX/CSV with a minimal Streamlit UI to do **manual column mapping** and persist segments.
 
 
+<a id="ticket-2"></a>
 ### TICKET 2: IMPORT XLSX/CSV + MANUAL COLUMN MAPPING + STORE SEGMENTS
 
 
@@ -1484,6 +1433,7 @@ NO Glossary, NO TM, NO QA, NO LLM calls in this ticket.
 Use a mock translator only.
 
 
+<a id="ticket-3"></a>
 ### TICKET 3: RUN JOB (MOCK) -> REVIEW/APPROVE -> EXPORT PATCH
 
 
@@ -1782,6 +1732,7 @@ Now add an additional export mode specifically for LP workflows:
 Export a COPY of the original XLSX with a NEW target column (e.g. "NEW DE") filled for approved rows.
 
 
+<a id="ticket-3b"></a>
 ### TICKET 3b: EXPORT LP COPY WITH "NEW <LANG>" COLUMN
 
 
@@ -2005,6 +1956,7 @@ Now implement the **Placeholder Firewall + basic QA flags**, and integrate it in
 This ticket must not add TM/Glossary or real LLM calls.
 
 
+<a id="ticket-4"></a>
 ### TICKET 4: PLACEHOLDER FIREWALL + QA FLAGS (FOUNDATION)
 
 
@@ -2169,6 +2121,7 @@ Now implement the **Glossary must-use engine** with robust matching to avoid sub
 No TM work in this ticket. No real LLM calls. Keep it deterministic.
 
 
+<a id="ticket-5"></a>
 ### TICKET 5: GLOSSARY MUST-USE (MATCHING + ENFORCEMENT)
 
 
@@ -2434,6 +2387,7 @@ Now implement **Translation Memory (TM)** with:
 No real LLM calls in this ticket.
 
 
+<a id="ticket-6"></a>
 ### TICKET 6: TM STORE + SEARCH (FTS5) + AUTO-LEARN FROM APPROVALS
 
 
@@ -2800,6 +2754,7 @@ Context:
 Now add the ability to use real LLM providers (BYOK) securely, with a policy layer that lets the user choose which provider/model to use per task.
 
 
+<a id="ticket-7"></a>
 ### TICKET 7: LLM PROVIDER LAYER + KEYRING SETTINGS + TRANSLATION VIA LLM
 
 
@@ -3169,6 +3124,7 @@ Now we must upgrade the importer so the system can correctly handle:
 - Change-file type spreadsheets with OLD/NEW source columns and existing target columns
 
 
+<a id="ticket-8"></a>
 ### TICKET 8: IMPORT v2 (EXISTING TARGET BASELINE + SOURCE OLD/NEW SUPPORT)
 
 
@@ -3446,6 +3402,7 @@ Context:
 
 Now add a Streamlit UI flow to create a new project from within the app.
 
+<a id="ticket-8b"></a>
 ### TICKET 8b: CREATE PROJECT IN STREAMLIT UI
 
 GOAL
@@ -3513,6 +3470,7 @@ No new tests required for Ticket 8b (UI-only), but make sure:
 Implement Ticket 8b only. Print a brief plan, then code.
 
 
+<a id="ticket-9"></a>
 ### TICKET 9: CHANGE-FILE VARIANT B (OLD/NEW SOURCE + EXISTING TARGETS)
 (Change-Management: Sorgt dafür, dass eine Change-Datei nicht blind komplett neu übersetzt wird, sondern dass das Tool gezielt entscheidet, was wirklich geändert werden muss. Erkennt Zeilen, wo EN-OLD ≠ EN-NEW -->klassifiziert pro Zeile: KEEP / UPDATE / FLAG (unklar/riskant → landet in Review))
 
@@ -3641,3 +3599,123 @@ ACCEPTANCE CRITERIA
 - Proposed translations are generated only for UPDATE (or flagged proposals if you choose).
 - Review UI shows old vs new and baseline vs proposed.
 - Export produces a copy with NEW <LANG> column containing only approved changes.
+
+<a id="ticket-10"></a>
+### TICKET 10: CHANGE-FILE VARIANT A (FILL NEW TARGETS)
+(Variant B = “Quelle geändert, aber Ziel existiert schon → entscheiden ob Update nötig ist”. 
+Variant A = “Quelle geändert → NEW DE muss befüllt werden”)
+
+You are Codex, an expert Python engineer. Implement **Ticket 10** only.
+
+Context:
+- Tickets 1–9 are done:
+  - Import supports LP + Change mode and stores source_text_old/source_text.
+  - Existing targets can be imported as baseline candidates (existing_target).
+  - Placeholder firewall + QA flags, glossary must-use enforcement.
+  - TM (exact + fuzzy) + auto-learn from approvals.
+  - LLM provider layer works.
+  - Ticket 9 implements Change Variant B (KEEP/UPDATE/FLAG) with review + export to NEW <LANG>.
+
+Now implement **Change-file Variant A**:
+- OLD/NEW source columns exist.
+- “NEW <LANG>” is expected to be produced (often empty in input).
+- We want to generate proposed translations for NEW source for changed rows, with optional baseline context.
+
+============================================================
+TICKET 10: CHANGE-FILE VARIANT A (FILL NEW TARGETS)
+============================================================
+
+GOAL
+1) Add a new job type: "change_variant_a".
+2) For each segment where source_text_old is not null and old!=new:
+   - create a proposed translation candidate for the selected target locale:
+     candidate_type="change_proposed"
+3) For unchanged rows (old==new): do nothing by default.
+4) Review UI shows:
+   - source_old, source_new
+   - baseline target (if any existing_target/approved)
+   - proposed target
+5) Export:
+   - reuse existing "LP copy with NEW <LANG> column" export
+   - fill NEW <LANG> only for APPROVED rows
+
+This workflow differs from variant B:
+- No KEEP/FLAG decision required in MVP; simply propose updates for changed rows.
+- Still use QA and allow manual edits + approve.
+
+============================================================
+PROPOSAL GENERATION (use existing pipeline)
+============================================================
+For each changed segment:
+- Use current pipeline order per target locale:
+  TM exact/fuzzy -> else LLM translator -> risk-gated reviewer
+- Must preserve placeholders/tags/newlines and enforce glossary as usual.
+- Save translation_candidates:
+  - candidate_type="change_proposed"
+  - score: 1.0 for tm_exact; fuzzy score normalized; else based on provider or 0.5
+  - model_info_json filled
+
+QA:
+- Run placeholder + glossary QA checks.
+- Create qa_flags on violations as usual.
+- Additionally create qa_flag type="stale_source_change" severity="warn" for changed segments (same as variant B).
+
+============================================================
+UI CHANGES
+============================================================
+Add a run option (either new page or extend Run Job page):
+- "Run Change Job (Variant A)"
+  - Select asset
+  - Select target locale (single locale, enabled in project; exclude source locale)
+  - Button: Run -> creates job, generates proposals for changed rows
+  - Show summary counts: changed rows, proposals created
+
+Review page:
+- Add filter “Only change proposals (Variant A)”
+- For each row show:
+  - old/new source + proposed target
+  - baseline target if exists (existing_target or approved)
+- Actions:
+  - Edit proposed
+  - Approve (writes approved_translations)
+  - Optional: “Skip” (no DB change)
+
+Export page:
+- No major changes required: user selects asset + locale and exports LP copy with "NEW <LANG>".
+- Ensure export writes only approved translations (existing behavior).
+
+============================================================
+DB / QUERIES
+============================================================
+- Add helper queries:
+  - list_changed_segments(asset_id)  (source_text_old not null and differs)
+  - upsert_change_proposal(segment_id, target_locale, text, model_info, score)
+  - list_proposals_for_asset(asset_id, target_locale) (candidate_type change_proposed)
+
+Note: Keep approved_translations unique constraint behavior.
+
+============================================================
+TESTS
+============================================================
+Add tests:
+1) Import a change-file-like dataset with old/new source for 3 rows (2 changed, 1 unchanged).
+2) Run change_variant_a job for de-DE:
+   - assert job exists
+   - assert change_proposed candidates exist only for changed rows
+   - assert stale_source_change qa_flags exist for changed rows
+3) Approve 1 proposed row.
+4) Export LP copy with NEW DE:
+   - verify NEW DE column exists and only the approved row is filled.
+
+pytest -q must pass.
+
+============================================================
+ACCEPTANCE CRITERIA
+============================================================
+- User can run "Change Variant A" on an imported change file.
+- Proposed translations generated for changed rows only.
+- Review/edit/approve works.
+- Export produces a copy with NEW <LANG> filled only for approved changes.
+- Tests pass.
+
+Implement Ticket 10 only. Print a brief plan, then code.
