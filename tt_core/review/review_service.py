@@ -30,8 +30,9 @@ class SegmentRow:
     row_index: int | None
     key: str | None
     source_text: str
-    cn_text: str | None
-    sheet_name: str | None
+    cn_text: str | None = None
+    sheet_name: str | None = None
+    source_text_old: str | None = None
 
 
 @dataclass(slots=True)
@@ -58,6 +59,15 @@ class ReviewRow:
     is_approved: bool
     qa_messages: list[str] = field(default_factory=list)
     has_qa_flags: bool = False
+    source_text_old: str | None = None
+    baseline_text: str | None = None
+    baseline_type: str | None = None
+    proposed_text: str | None = None
+    proposed_type: str | None = None
+    change_decision: str | None = None
+    change_confidence: int | None = None
+    change_reason: str | None = None
+    is_changed: bool = False
 
 
 @dataclass(slots=True)
@@ -117,7 +127,7 @@ def list_segments(*, db_path: Path, asset_id: str) -> list[SegmentRow]:
             rows = connection.execute(
                 text(
                     """
-                    SELECT id, asset_id, row_index, key, source_text, cn_text, sheet_name
+                    SELECT id, asset_id, row_index, key, source_text, source_text_old, cn_text, sheet_name
                     FROM segments
                     WHERE asset_id = :asset_id
                     ORDER BY row_index, id
@@ -135,8 +145,9 @@ def list_segments(*, db_path: Path, asset_id: str) -> list[SegmentRow]:
             row_index=row[2],
             key=row[3],
             source_text=str(row[4]),
-            cn_text=row[5],
-            sheet_name=row[6],
+            source_text_old=row[5],
+            cn_text=row[6],
+            sheet_name=row[7],
         )
         for row in rows
     ]
@@ -413,12 +424,18 @@ def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> lis
                         s.id AS segment_id,
                         s.row_index,
                         s.key,
+                        s.source_text_old,
                         s.source_text,
                         s.cn_text,
                         s.sheet_name,
                         tc.candidate_text,
                         tc.candidate_type,
-                        at.final_text
+                        tc.model_info_json,
+                        etc.candidate_text,
+                        at.final_text,
+                        ctc.candidate_text,
+                        ctc.candidate_type,
+                        ctc.model_info_json
                     FROM segments AS s
                     LEFT JOIN translation_candidates AS tc
                         ON tc.id = (
@@ -429,9 +446,29 @@ def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> lis
                             ORDER BY t2.generated_at DESC, t2.id DESC
                             LIMIT 1
                         )
+                    LEFT JOIN translation_candidates AS etc
+                        ON etc.id = (
+                            SELECT e2.id
+                            FROM translation_candidates AS e2
+                            WHERE e2.segment_id = s.id
+                              AND e2.target_locale = :target_locale
+                              AND e2.candidate_type = 'existing_target'
+                            ORDER BY e2.generated_at DESC, e2.id DESC
+                            LIMIT 1
+                        )
                     LEFT JOIN approved_translations AS at
                         ON at.segment_id = s.id
                        AND at.target_locale = :target_locale
+                    LEFT JOIN translation_candidates AS ctc
+                        ON ctc.id = (
+                            SELECT c2.id
+                            FROM translation_candidates AS c2
+                            WHERE c2.segment_id = s.id
+                              AND c2.target_locale = :target_locale
+                              AND c2.candidate_type IN ('change_proposed', 'change_flagged_proposed')
+                            ORDER BY c2.generated_at DESC, c2.id DESC
+                            LIMIT 1
+                        )
                     WHERE s.asset_id = :asset_id
                     ORDER BY s.row_index, s.id
                     """
@@ -441,7 +478,7 @@ def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> lis
             qa_rows = connection.execute(
                 text(
                     """
-                    SELECT q.segment_id, q.message
+                    SELECT q.segment_id, q.type, q.message, q.span_json
                     FROM qa_flags AS q
                     INNER JOIN segments AS s
                         ON s.id = q.segment_id
@@ -456,27 +493,129 @@ def list_review_rows(*, db_path: Path, asset_id: str, target_locale: str) -> lis
     finally:
         engine.dispose()
 
-    qa_by_segment: dict[str, list[str]] = defaultdict(list)
+    qa_by_segment: dict[str, list[tuple[str, str, dict[str, object]]]] = defaultdict(list)
     for qa_row in qa_rows:
-        qa_by_segment[str(qa_row[0])].append(str(qa_row[1]))
-
-    return [
-        ReviewRow(
-            segment_id=str(row[0]),
-            row_index=row[1],
-            key=row[2],
-            source_text=str(row[3]),
-            cn_text=row[4],
-            sheet_name=row[5],
-            candidate_text=row[6],
-            candidate_type=row[7],
-            approved_text=row[8],
-            is_approved=row[8] is not None,
-            qa_messages=qa_by_segment.get(str(row[0]), []),
-            has_qa_flags=bool(qa_by_segment.get(str(row[0]), [])),
+        try:
+            span_payload = json.loads(qa_row[3] or "{}")
+        except (TypeError, ValueError):
+            span_payload = {}
+        if not isinstance(span_payload, dict):
+            span_payload = {}
+        qa_by_segment[str(qa_row[0])].append(
+            (
+                str(qa_row[1]),
+                str(qa_row[2]),
+                span_payload,
+            )
         )
-        for row in rows
-    ]
+
+    review_rows: list[ReviewRow] = []
+    for row in rows:
+        segment_id = str(row[0])
+        qa_entries = qa_by_segment.get(segment_id, [])
+        qa_messages = [message for _, message, _ in qa_entries]
+
+        latest_model_info: dict[str, object] = {}
+        change_model_info: dict[str, object] = {}
+        try:
+            latest_model_info = json.loads(row[9] or "{}")
+        except (TypeError, ValueError):
+            latest_model_info = {}
+        if not isinstance(latest_model_info, dict):
+            latest_model_info = {}
+        try:
+            change_model_info = json.loads(row[14] or "{}")
+        except (TypeError, ValueError):
+            change_model_info = {}
+        if not isinstance(change_model_info, dict):
+            change_model_info = {}
+
+        approved_text = row[11]
+        existing_target_text = row[10]
+        baseline_text = approved_text if approved_text is not None else existing_target_text
+        baseline_type = None
+        if approved_text is not None:
+            baseline_type = "approved"
+        elif existing_target_text is not None:
+            baseline_type = "existing_target"
+
+        candidate_text = row[7]
+        candidate_type = row[8]
+        proposed_text = row[12]
+        proposed_type = row[13]
+        proposed_model = change_model_info
+
+        if proposed_text is None and candidate_type != "existing_target":
+            proposed_text = candidate_text
+            proposed_type = candidate_type
+            proposed_model = latest_model_info
+
+        change_decision: str | None = None
+        change_confidence: int | None = None
+        change_reason: str | None = None
+
+        if proposed_type in {"change_proposed", "change_flagged_proposed"}:
+            raw_confidence = proposed_model.get("change_confidence")
+            change_decision = str(proposed_model.get("change_decision") or "UPDATE")
+            if raw_confidence is not None:
+                try:
+                    change_confidence = int(float(str(raw_confidence)))
+                except ValueError:
+                    change_confidence = None
+            reason_value = proposed_model.get("change_reason")
+            if reason_value is not None:
+                change_reason = str(reason_value)
+
+        for flag_type, _, span_payload in qa_entries:
+            if flag_type not in {"impact_flagged", "stale_source_change"}:
+                continue
+            change_decision = change_decision or str(
+                span_payload.get("decision") or ("FLAG" if flag_type == "impact_flagged" else "KEEP")
+            )
+            if change_confidence is None and span_payload.get("confidence") is not None:
+                try:
+                    change_confidence = int(float(str(span_payload["confidence"])))
+                except ValueError:
+                    change_confidence = None
+            if not change_reason and span_payload.get("reason") is not None:
+                change_reason = str(span_payload["reason"])
+            if flag_type == "impact_flagged":
+                break
+
+        source_text_old = row[3]
+        source_text = str(row[4])
+        is_changed = (
+            source_text_old is not None
+            and str(source_text_old).strip() != source_text.strip()
+        )
+
+        review_rows.append(
+            ReviewRow(
+                segment_id=segment_id,
+                row_index=row[1],
+                key=row[2],
+                source_text=source_text,
+                cn_text=row[5],
+                sheet_name=row[6],
+                candidate_text=candidate_text,
+                candidate_type=candidate_type,
+                approved_text=approved_text,
+                is_approved=approved_text is not None,
+                qa_messages=qa_messages,
+                has_qa_flags=bool(qa_entries),
+                source_text_old=source_text_old,
+                baseline_text=baseline_text,
+                baseline_type=baseline_type,
+                proposed_text=proposed_text,
+                proposed_type=proposed_type,
+                change_decision=change_decision,
+                change_confidence=change_confidence,
+                change_reason=change_reason,
+                is_changed=is_changed,
+            )
+        )
+
+    return review_rows
 
 
 def list_approved_for_asset(*, db_path: Path, asset_id: str, target_locale: str) -> list[ApprovedPatchRow]:

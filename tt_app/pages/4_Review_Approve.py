@@ -64,20 +64,30 @@ def _apply_filter(rows: list[ReviewRow], filter_option: str) -> list[ReviewRow]:
         return [row for row in rows if not row.is_approved]
     if filter_option == "Only rows with QA flags":
         return [row for row in rows if _row_has_qa_flags(row)]
+    if filter_option == "Only changed (stale)":
+        return [row for row in rows if row.is_changed]
     return rows
 
 
 def _has_candidate_text(row: ReviewRow) -> bool:
-    value = row.candidate_text
+    value = row.proposed_text or row.candidate_text or row.baseline_text
     return isinstance(value, str) and bool(value.strip())
 
 
-def _candidate_label(row: ReviewRow) -> str:
-    if row.candidate_type == "existing_target":
+def _baseline_label(row: ReviewRow) -> str:
+    if row.baseline_type == "approved":
+        return "Current approved"
+    if row.baseline_type == "existing_target":
         return "Existing baseline"
-    if row.candidate_type:
-        return str(row.candidate_type)
-    return "Latest candidate"
+    return "Baseline"
+
+
+def _proposed_label(row: ReviewRow) -> str:
+    if row.proposed_type == "change_proposed":
+        return "Proposed update"
+    if row.proposed_type:
+        return str(row.proposed_type)
+    return "Proposed target"
 
 
 def _init_row_state(rows: list[ReviewRow], target_locale: str) -> None:
@@ -86,15 +96,28 @@ def _init_row_state(rows: list[ReviewRow], target_locale: str) -> None:
         bulk_key = _bulk_key(target_locale, row.segment_id)
 
         if edit_key not in st.session_state:
-            st.session_state[edit_key] = row.approved_text or row.candidate_text or ""
+            st.session_state[edit_key] = (
+                row.approved_text
+                or row.proposed_text
+                or row.baseline_text
+                or row.candidate_text
+                or ""
+            )
         if bulk_key not in st.session_state:
             st.session_state[bulk_key] = row.is_approved
 
 
-def _approve_row(*, db_path: Path, row: ReviewRow, target_locale: str) -> bool:
+def _approve_row(
+    *,
+    db_path: Path,
+    row: ReviewRow,
+    target_locale: str,
+    override_text: str | None = None,
+) -> bool:
     edit_key = _edit_key(target_locale, row.segment_id)
 
-    draft_text = str(st.session_state.get(edit_key, ""))
+    draft_text = override_text if override_text is not None else str(st.session_state.get(edit_key, ""))
+    st.session_state[edit_key] = draft_text
     if not draft_text.strip():
         st.warning(f"Row {row.row_index}: approved text cannot be empty.")
         return False
@@ -192,7 +215,13 @@ if not rows:
     st.info("No segments in this asset.")
     st.stop()
 
-filter_options = ["show all", "show only not approved", "show only approved", "Only rows with QA flags"]
+filter_options = [
+    "show all",
+    "show only not approved",
+    "show only approved",
+    "Only rows with QA flags",
+    "Only changed (stale)",
+]
 if "review_filter_option" not in st.session_state:
     st.session_state["review_filter_option"] = "show all"
 
@@ -232,9 +261,11 @@ table_rows = [
     {
         "row_index": row.row_index,
         "key": row.key,
-        "source_text": row.source_text,
-        "candidate_type": row.candidate_type,
-        "candidate_text": row.candidate_text,
+        "source_old": row.source_text_old,
+        "source_new": row.source_text,
+        "baseline_target": row.baseline_text,
+        "proposed_target": row.proposed_text,
+        "decision": row.change_decision,
         "approved_text": row.approved_text,
         "qa_flags": " | ".join(_row_qa_messages(row)),
     }
@@ -279,8 +310,17 @@ for row in filtered_rows:
         st.write(
             f"Row {row.row_index} | Key: {row.key or '-'} | Sheet: {row.sheet_name or '-'} | Segment: {row.segment_id[:8]}"
         )
-        st.write(f"Source: {row.source_text}")
-        st.write(f"{_candidate_label(row)}: {row.candidate_text or '(none)'}")
+        if row.source_text_old is not None:
+            st.write(f"Source OLD: {row.source_text_old}")
+        st.write(f"Source NEW: {row.source_text}")
+        st.write(f"{_baseline_label(row)}: {row.baseline_text or '(none)'}")
+        st.write(f"{_proposed_label(row)}: {row.proposed_text or '(none)'}")
+        if row.change_decision:
+            confidence_label = (
+                f" ({row.change_confidence}%)" if row.change_confidence is not None else ""
+            )
+            reason_label = f" | {row.change_reason}" if row.change_reason else ""
+            st.write(f"Decision: {row.change_decision}{confidence_label}{reason_label}")
         st.write(f"Approved text: {row.approved_text or '(none)'}")
         row_qa_messages = _row_qa_messages(row)
         if row_qa_messages:
@@ -293,12 +333,37 @@ for row in filtered_rows:
             height=120,
         )
 
-        left_col, right_col = st.columns([1, 1])
-        left_col.checkbox(
-            "Select for bulk approve",
-            key=_bulk_key(selected_target_locale, row.segment_id),
-        )
-        if right_col.button("Approve row", key=f"approve_row_{selected_target_locale}_{row.segment_id}"):
+        action_proposed_col, action_keep_col, action_edit_col = st.columns(3)
+        if action_proposed_col.button(
+            "Approve proposed",
+            key=f"approve_proposed_{selected_target_locale}_{row.segment_id}",
+            disabled=not bool((row.proposed_text or "").strip()),
+        ):
+            if _approve_row(
+                db_path=db_path,
+                row=row,
+                target_locale=selected_target_locale,
+                override_text=row.proposed_text or "",
+            ):
+                st.success(f"Row {row.row_index} approved from proposed text.")
+                st.rerun()
+        if action_keep_col.button(
+            "Keep baseline",
+            key=f"keep_baseline_{selected_target_locale}_{row.segment_id}",
+            disabled=not bool((row.baseline_text or "").strip()),
+        ):
+            if _approve_row(
+                db_path=db_path,
+                row=row,
+                target_locale=selected_target_locale,
+                override_text=row.baseline_text or "",
+            ):
+                st.success(f"Row {row.row_index} kept and approved.")
+                st.rerun()
+        if action_edit_col.button(
+            "Edit + approve",
+            key=f"approve_row_{selected_target_locale}_{row.segment_id}",
+        ):
             if _approve_row(
                 db_path=db_path,
                 row=row,
@@ -306,3 +371,8 @@ for row in filtered_rows:
             ):
                 st.success(f"Row {row.row_index} approved.")
                 st.rerun()
+
+        st.checkbox(
+            "Select for bulk approve",
+            key=_bulk_key(selected_target_locale, row.segment_id),
+        )

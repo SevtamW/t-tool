@@ -18,7 +18,7 @@ def _ensure_repo_root_on_path() -> None:
 
 _ensure_repo_root_on_path()
 
-from tt_core.jobs.job_service import run_mock_translation_job
+from tt_core.jobs.job_service import run_change_variant_b_job, run_mock_translation_job
 from tt_core.project.create_project import load_project_info
 from tt_core.review.review_service import list_assets, list_segments
 
@@ -28,6 +28,7 @@ def _asset_label(asset_id: str, original_name: str | None, received_at: str) -> 
 
 
 LAST_JOB_SUMMARY_KEY = "run_job_last_summary"
+LAST_CHANGE_JOB_SUMMARY_KEY = "run_change_job_last_summary"
 
 
 st.title("Run Job")
@@ -70,10 +71,21 @@ selected_target_locale = st.selectbox(
     index=target_locales.index(default_target),
 )
 
-segment_count = len(list_segments(db_path=db_path, asset_id=selected_asset_id))
-st.write(f"Segments in selected asset: {segment_count}")
+segments = list_segments(db_path=db_path, asset_id=selected_asset_id)
+segment_count = len(segments)
+changed_count = sum(
+    1
+    for segment in segments
+    if segment.source_text_old is not None
+    and str(segment.source_text_old).strip() != segment.source_text.strip()
+)
+st.write(f"Segments in selected asset: {segment_count} | Changed rows: {changed_count}")
 
-if st.button("Run translation", type="primary"):
+translation_col, change_col = st.columns(2)
+run_translation_clicked = translation_col.button("Run translation", type="primary")
+run_change_clicked = change_col.button("Run Change Review (Variant B)")
+
+if run_translation_clicked:
     try:
         with st.spinner("Running translation job..."):
             result = run_mock_translation_job(
@@ -98,6 +110,34 @@ if st.button("Run translation", type="primary"):
         "status": result.status,
     }
 
+if run_change_clicked:
+    try:
+        with st.spinner("Running change review job..."):
+            result = run_change_variant_b_job(
+                db_path=db_path,
+                project_id=project.project_id,
+                asset_id=selected_asset_id,
+                target_locale=selected_target_locale,
+                decision_trace={"page": "3_Run_Job", "mode": "change_variant_b"},
+            )
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Failed to run change review job: {exc}")
+        st.stop()
+
+    st.session_state["selected_asset_id"] = selected_asset_id
+    st.session_state["selected_target_locale"] = selected_target_locale
+    st.session_state[LAST_CHANGE_JOB_SUMMARY_KEY] = {
+        "project_slug": project.slug,
+        "asset_id": selected_asset_id,
+        "target_locale": result.target_locale,
+        "job_id": result.job_id,
+        "changed_segments": result.changed_segments,
+        "keep_count": result.keep_count,
+        "update_count": result.update_count,
+        "flag_count": result.flag_count,
+        "status": result.status,
+    }
+
 last_job_summary = st.session_state.get(LAST_JOB_SUMMARY_KEY)
 if (
     isinstance(last_job_summary, dict)
@@ -111,3 +151,19 @@ if (
     st.write(f"Target locale: {last_job_summary['target_locale']}")
     st.write(f"Segments processed: {last_job_summary['processed_segments']}")
     st.write(f"Status: {last_job_summary['status']}")
+
+last_change_job_summary = st.session_state.get(LAST_CHANGE_JOB_SUMMARY_KEY)
+if (
+    isinstance(last_change_job_summary, dict)
+    and last_change_job_summary.get("project_slug") == project.slug
+    and last_change_job_summary.get("asset_id") == selected_asset_id
+    and last_change_job_summary.get("target_locale") == selected_target_locale
+):
+    st.success("Change review job completed")
+    st.caption("Last completed change review")
+    st.write(f"Job ID: {last_change_job_summary['job_id']}")
+    st.write(f"Changed rows: {last_change_job_summary['changed_segments']}")
+    st.write(f"KEEP: {last_change_job_summary['keep_count']}")
+    st.write(f"UPDATE: {last_change_job_summary['update_count']}")
+    st.write(f"FLAG: {last_change_job_summary['flag_count']}")
+    st.write(f"Status: {last_change_job_summary['status']}")

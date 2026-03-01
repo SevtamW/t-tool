@@ -3513,326 +3513,131 @@ No new tests required for Ticket 8b (UI-only), but make sure:
 Implement Ticket 8b only. Print a brief plan, then code.
 
 
-Ticket 9 (noch nicht implementiert):
+### TICKET 9: CHANGE-FILE VARIANT B (OLD/NEW SOURCE + EXISTING TARGETS)
+(Change-Management: Sorgt dafür, dass eine Change-Datei nicht blind komplett neu übersetzt wird, sondern dass das Tool gezielt entscheidet, was wirklich geändert werden muss. Erkennt Zeilen, wo EN-OLD ≠ EN-NEW -->klassifiziert pro Zeile: KEEP / UPDATE / FLAG (unklar/riskant → landet in Review))
 
 You are Codex, an expert Python engineer. Implement **Ticket 9** only.
 
-
 Context:
+- Tickets 1–8 (+ 8b UI create project) are implemented.
+- Import supports change mode with source_old/source_new into segments.source_text_old/source_text.
+- Baseline targets can be imported as translation_candidates (existing_target).
+- There is a job pipeline, review/approve UI, exports including LP copy with "NEW <LANG>" column.
+- Placeholder firewall + glossary enforcement + TM + LLM provider are available.
 
-- Ticket 1–8 are done:
-
-  - local-first projects + SQLite migrations (now schema_version=3 with segments.source_text_old)
-
-  - importer supports LP mode and Change mode (OLD/NEW source mapping)
-
-  - existing target translations can be imported as translation_candidates type="existing_target"
-
-  - job run/review/export exists
-
-  - placeholder firewall + QA flags
-
-  - glossary must-use enforcement
-
-  - TM + FTS5 + auto-learn from approvals
-
-  - LLM provider layer (BYOK) for translation drafts is available
-
-
-Now implement Change-File processing: Variant B
-
-- Files have OLD EN + NEW EN (source_old/source_new), and existing target columns (e.g. DE already filled).
-
-- We must NOT overwrite existing target columns.
-
-- We produce proposed updates and export ONLY to a separate column: "NEW <LANG>" (e.g. "NEW DE").
-
-
-### TICKET 9: CHANGE-FILE VARIANT B (STALE + KEEP/UPDATE/FLAG + REVIEW + NEW COLUMN EXPORT)
-
+============================================================
+TICKET 9: CHANGE-FILE VARIANT B (OLD/NEW SOURCE + EXISTING TARGETS)
+============================================================
 
 GOAL
-
-1) Add a new job type "change_update_variant_b" that runs on assets imported in mode="change_source_update".
-
-2) For each segment where source_text_old != source_text (NEW), mark it as STALE and generate a decision:
-
-   - KEEP: existing target still ok; proposal = existing target (baseline)
-
-   - UPDATE: generate a proposed new translation for NEW source_text
-
-   - FLAG: uncertain; require review without auto-proposal (or propose but mark low confidence)
-
-3) Integrate into Streamlit:
-
-   - Run Job page: allow running "Change review (Variant B)" for eligible assets.
-
-   - Review page: add filter "Only stale rows" and show OLD vs NEW source + existing target + proposed update.
-
-4) Export:
-
-   - Use the existing LP-copy-with-new-column exporter to create a copy of the original XLSX with "NEW <LANG>" column.
-
-   - Fill "NEW <LANG>" ONLY for rows that the user approved (final decision).
-
-   - Do not touch existing target column.
-
-
-No Feishu/WhatsApp. No stealth automation.
-
-
-#### ELIGIBILITY / DETECTION
-
-An asset is eligible for Variant B if:
-
-- asset.asset_type == "xlsx"
-
-- latest schema_profile for the project/signature has mapping_json.mode == "change_source_update"
-
-- mapping_json.columns.source_old and columns.source_new are both present
-
-- mapping_json.columns.target and columns.target_locale are present (baseline exists) OR we can still run without baseline but will likely UPDATE/FLAG
-
-
-If not eligible, the UI should disable the option with a clear reason.
-
-
-#### IMPACT ANALYSIS (DETERMINISTIC MVP)
-
-Implement a deterministic impact analyzer (no new LLM task required in Ticket 9):
-
-
-Given (old_src, new_src):
-
-- If old_src is empty OR new_src is empty -> FLAG
-
-- If old_src == new_src -> NOT STALE (skip)
-
-- If normalized(old_src) == normalized(new_src) where normalize collapses whitespace and normalizes punctuation spacing -> KEEP (low risk)
-
-- If similarity(old_src, new_src) >= 0.97 and only punctuation/whitespace changes -> KEEP
-
-- Otherwise -> UPDATE
-
-
-Where similarity can use rapidfuzz (already dependency in project) and compare normalized strings.
-
-
-Additionally:
-
-- If placeholders/tags patterns differ between old_src and new_src -> FLAG (because risk of placeholder mismatch).
-
-  Use your placeholder/tag detection (from Ticket 4) to compare placeholder inventories on old vs new source.
-
-
-#### WHAT TO GENERATE PER STALE ROW
-
-We need to store stale/decisions and proposals without changing schema.
-
-
-Use existing tables:
-
-- qa_flags: store stale markers and flags
-
-- translation_candidates: store proposals
-
-
-For each stale segment (for target locale):
-
-1) Insert/replace a qa_flag:
-
-   - type="stale_source_changed"
-
-   - severity="warn"
-
-   - message includes short reason, e.g. "Source changed: KEEP suggested (punctuation only)" or "UPDATE suggested (substantive change)"
-
-   - span_json may include {"old": "...", "new": "...", "similarity": 0.83, "decision":"UPDATE"}
-
-
-2) Proposal candidate rows:
-
-   - If decision == KEEP and there is an existing_target candidate:
-
-       - create translation_candidates row:
-
-         candidate_type="keep_existing"
-
-         candidate_text = existing_target text
-
-         score = similarity (or 1.0)
-
-         model_info_json includes {"decision":"KEEP","reason":"minor_change","similarity":...}
-
-   - If decision == UPDATE:
-
-       - generate proposed translation using your normal translation pipeline on NEW source_text:
-
-         order remains: TM exact/fuzzy -> else LLM translator
-
-         also apply placeholder firewall + glossary enforcement + QA like normal
-
-       - store candidate_type="proposed_update"
-
-       - model_info_json includes {"decision":"UPDATE","similarity":...,"source_changed":true}
-
-   - If decision == FLAG:
-
-       - either:
-
-         A) do not create a proposed candidate, or
-
-         B) create candidate_type="flagged" with empty or baseline text
-
-       Choose the simplest approach, but make it clear in UI that user must decide.
-
-
-IMPORTANT:
-
-- Do NOT auto-approve anything in Ticket 9.
-
-- Do not overwrite existing_target candidates.
-
-- If an approved_translation exists already for (segment_id, target_locale), do not generate new proposals and do not create stale flags for that row (treat as already resolved).
-
-
-#### JOB RECORD
-
-Insert into jobs:
-
-- job_type="change_update_variant_b"
-
-- status transitions queued->running->done
-
-- targets_json = ["<target_locale>"]
-
-- decision_trace_json: include asset_id, mode, counts (stale_count, keep_suggested, update_suggested, flagged)
-
-
-#### STREAMLIT CHANGES
-
-
-Page "Run Job":
-
-- Add "Job type" selector:
-
-  - "Translate (normal)"
-
-  - "Change review (Variant B)"
-
-- If Change review selected:
-
-  - Show only eligible assets (or show all with eligibility status).
-
-  - Use target locale from schema_profile mapping_json.columns.target_locale as default (but allow override to another enabled locale if user wants).
-
-  - Button "Run Change Review"
-
-
-Page "Review & Approve":
-
-- Add filter "Only stale rows"
-
-- For stale rows show:
-
-  - OLD source (segments.source_text_old)
-
-  - NEW source (segments.source_text)
-
-  - Existing target (existing_target candidate if any)
-
-  - Proposed candidate (keep_existing/proposed_update)
-
-  - QA flags (already supported)
-
-- Provide quick actions:
-
-  - "Use Existing (KEEP)" sets current editable text to existing_target
-
-  - "Use Proposed (UPDATE)" sets editable text to proposed_update
-
-  - Approve saves approved_translations as usual
-
-
-Export page:
-
-- Reuse existing LP-copy-with-new-column exporter:
-
-  - Export mode: "Change-file copy with NEW <LANG> column"
-
-  - Should behave same as LP: create copy, add "NEW DE" column, fill approved rows only.
-
-
-#### TESTS
-
-Add tests for Variant B:
-
-
-1) Setup:
-
-- Create temp project + DB.
-
-- Create a tiny XLSX with headers: ["EN-OLD","EN-NEW","DE"] and 3 rows:
-
-  Row1: old==new (should not be stale)
-
-  Row2: punctuation-only change (KEEP suggested)
-
-  Row3: substantive change (UPDATE suggested)
-
-- Import using change mode mapping:
-
-  - source_old = EN-OLD
-
-  - source_new = EN-NEW
-
-  - target = DE, target_locale=de-DE
-
-
-2) Run change job in code (not streamlit):
-
-- Assert:
-
-  - job row inserted
-
-  - qa_flags created for the 2 stale rows (type stale_source_changed)
-
-  - translation_candidates created:
-
-    - row2 has keep_existing (if existing_target present)
-
-    - row3 has proposed_update OR at least some proposal generated by pipeline
-
-
-3) Approval + export:
-
-- Approve only one stale row (e.g. row3).
-
-- Run export NEW column.
-
-- Load exported workbook and verify:
-
-  - "NEW DE" exists
-
-  - only approved row has value in NEW DE column (others unchanged/empty)
-
-
-All tests: pytest -q passes.
-
-
-#### ACCEPTANCE CRITERIA
-
-- You can import a change file (OLD/NEW) + existing targets (Ticket 8 already).
-
-- You can run "Change review (Variant B)" and get stale flags + proposals.
-
-- You can review OLD vs NEW and pick KEEP/UPDATE, approve per row.
-
-- Export produces an XLSX copy with "NEW <LANG>" column filled only for approved rows.
-
-- No overwrite of existing target column.
-
-- pytest passes.
-
-
-Implement Ticket 9 only. Print a brief plan, then code.
+Implement a workflow for "Change file variant B":
+- We have source_old and source_new (stored in segments.source_text_old and segments.source_text).
+- Targets already exist (baseline candidates imported as existing_target).
+- We must decide for each changed row whether to KEEP existing target, UPDATE with a proposed new translation, or FLAG for review.
+
+No file-format-specific red coloring handling needed.
+
+============================================================
+DEFINITIONS
+============================================================
+- A segment is "changed" if source_text_old is not null AND source_text_old != source_text (string compare after trim).
+- For a given target locale, baseline text is:
+  - latest existing_target candidate if present
+  - OR approved_translations if present (show it as current final)
+- Proposed update is a new translation candidate, NOT auto-approved.
+
+============================================================
+IMPACT ANALYSIS (DETERMINISTIC FIRST)
+============================================================
+Implement a function classify_change(old, new) -> ("KEEP"|"UPDATE"|"FLAG", confidence, reason)
+
+Rules (MVP):
+- If normalize(old) == normalize(new) (whitespace-only): KEEP (confidence high)
+- If only punctuation changed (.,!?:; quotes) and token content same: KEEP
+- If placeholder/tag patterns changed: FLAG (risk)
+- If length delta > 30% or word count delta > 20%: UPDATE
+- Else: FLAG (or UPDATE depending on your preference; choose FLAG to be safe)
+
+Optionally (risk-gated) you may call an LLM "impact_analyzer" when result is FLAG to decide KEEP vs UPDATE, returning JSON:
+{ decision, confidence, reason }
+
+============================================================
+PROPOSAL GENERATION
+============================================================
+If decision == UPDATE:
+- Generate a proposed translation candidate for target locale:
+  - Use existing pipeline order:
+    TM exact/fuzzy -> else LLM translator -> optional reviewer (risk-gated)
+  - Must preserve placeholders/tags and enforce glossary as usual.
+- Save candidate_type = "change_proposed"
+- Score = confidence/100 or 1.0 if TM exact
+
+If decision == KEEP:
+- Do NOT generate a new candidate; keep baseline.
+- But store the decision in a job decision trace and/or a lightweight per-segment record (can be JSON in job decision_trace_json).
+
+If decision == FLAG:
+- Do not overwrite anything; optionally generate a proposed candidate but mark it clearly as low-confidence (candidate_type="change_flagged_proposed") OR skip.
+- Always create a QA flag type="stale_source_change" for visibility.
+
+============================================================
+DB / JOBS
+============================================================
+Add a new job_type: "change_variant_b"
+- job targets_json includes the selected target locale(s) (for Ticket 9 support single locale only).
+- decision_trace_json should store summary counts and rules used.
+
+QA flags:
+- Create qa_flags for:
+  - "stale_source_change" (warn) when old!=new
+  - "impact_flagged" (warn) when decision == FLAG
+  - existing placeholder/glossary QA still applies to proposed candidates
+
+============================================================
+STREAMLIT UI
+============================================================
+Add a page (or extend Run Job page):
+- "Run Change Review (Variant B)"
+  - Choose asset
+  - Choose target locale (single select)
+  - Button: Run
+  - Show summary counts: changed rows, keep/update/flag counts
+
+Update Review page for this mode:
+- Add a filter: "Only changed (stale)".
+- For each row show:
+  - source_old, source_new
+  - baseline target (existing_target or approved)
+  - proposed target (if any)
+  - decision (keep/update/flag)
+- Provide actions per row:
+  - "Approve proposed" (writes approved_translations)
+  - "Keep baseline" (optional: explicitly mark as reviewed/kept)
+  - "Edit + approve" (manual edit)
+
+EXPORT:
+- Reuse "LP copy with NEW <LANG>" export.
+- For this workflow, export should fill NEW <LANG> only for approved rows.
+
+============================================================
+TESTS
+============================================================
+Add tests:
+1) Import a change-file style xlsx/dataframe with old/new source.
+2) Import baseline existing target.
+3) Run change_variant_b job:
+   - ensure changed rows get qa_flag stale_source_change
+   - ensure proposed candidates created only for UPDATE
+4) Approve a proposed row -> TM learns (existing behavior)
+5) Export LP copy with NEW <LANG> includes only approved rows.
+
+pytest -q must pass.
+
+============================================================
+ACCEPTANCE CRITERIA
+============================================================
+- You can import change-file with old/new columns.
+- Running change job produces keep/update/flag decisions.
+- Proposed translations are generated only for UPDATE (or flagged proposals if you choose).
+- Review UI shows old vs new and baseline vs proposed.
+- Export produces a copy with NEW <LANG> column containing only approved changes.
